@@ -1,6 +1,9 @@
 # Gradle
 .gradle/
 build/
+bin/
+Task
+build_status.txt
 !gradle/wrapper/gradle-wrapper.jar
 
 # IDE
