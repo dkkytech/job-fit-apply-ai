@@ -49,25 +49,11 @@ class NotificationClient(
         }
     }
 
-    /** Send a plain-text Telegram message. */
-    fun postTelegram(text: String) = postTelegram(text, parseMode = null)
-
-    /**
-     * Send a Telegram message rendered as HTML (`parse_mode=HTML`), so `<a href>` links are
-     * clickable. Callers must HTML-escape any interpolated user text.
-     */
-    fun postTelegramHtml(text: String) = postTelegram(text, parseMode = "HTML")
-
-    private fun postTelegram(text: String, parseMode: String?) {
+    fun postTelegram(text: String) {
         if (!telegramConfigured) return
         chunkLines(text, 4096).forEach { chunk ->
             try {
-                val payload = buildMap<String, Any> {
-                    put("chat_id", telegramChatId)
-                    put("text", chunk)
-                    if (!parseMode.isNullOrBlank()) put("parse_mode", parseMode)
-                }
-                val body = Json.mapper.writeValueAsString(payload)
+                val body = Json.mapper.writeValueAsString(mapOf("chat_id" to telegramChatId, "text" to chunk))
                 val req  = HttpPost("https://api.telegram.org/bot$telegramToken/sendMessage").apply {
                     entity = StringEntity(body, ContentType.APPLICATION_JSON)
                 }

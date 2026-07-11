@@ -14,9 +14,9 @@ The pipeline is split into two halves connected by the bridge job queue:
 ## What it does
 
 - Fetches recruiter emails and job-board digests from Gmail, or pulls live listings from the JSearch API.
-- Classifies the email, expands digests into per-job records, and scrapes each job page (HTTP + schema.org JSON-LD for most boards, Playwright + Chrome profile for LinkedIn).
-- Submits each ingested job to the bridge queue; `--max-emails` is fire-and-forget while `--email` polls the single job to completion.
-- The worker claims jobs from the queue and runs the processing pipeline: deduplicates, scores fit, runs `ResumeTailoringSubgraph`, renders a tailored HTML + PDF via Playwright, and appends a run record to `output/runs/run_log.jsonl`.
+- Classifies the email, expands digests into per-job records, and scrapes each job page (HTTP for most boards, Playwright + Chrome profile for LinkedIn).
+- Submits each ingested job to the bridge queue and polls for results.
+- The worker claims jobs from the queue and runs the processing pipeline: deduplicates, scores fit, runs `ResumeTailoringSubgraph`, renders a tailored HTML + PDF via Playwright.
 - Tracks every job in Supabase and, when the source is a recruiter email, drafts a reply with your preferences pre-filled.
 
 ## Quick start
@@ -56,14 +56,9 @@ flowchart TD
     ScrapeSingle --> SaveSingle["SaveJobDescriptionNode"]
     SaveSingle --> Submit
 
-    Submit["bridge.submit(JdRecord)\n+ apply JD_Processing label"] --> Batch["--max-emails: fire-and-forget\n(worker owns terminal state)"]
-    Submit --> Single["--email: pollUntilTerminal\n→ EmailLabelingService"]
+    Submit["bridge.submit(JdRecord)\n+ apply JD_Processing label"] --> Poll["bridge.pollUntilTerminal(jobId)\n(blocks until worker done)"]
+    Poll --> Label["EmailLabelingService\n(JD_Processed / Recruiter_Response_Required / …)"]
 ```
-
-`--max-emails` is **fire-and-forget**: it submits each job, applies the `JD_Processing`
-label, and returns — the worker drives the job to completion and (for recruiter emails)
-creates the draft reply and applies `Recruiter_Response_Required`. `--email` instead
-polls the single job to completion and then applies the terminal label.
 
 ### Processing (`--worker`)
 
@@ -95,12 +90,7 @@ flowchart TD
     Artifact --> Track2["SupabaseTrackNode"]
     Track1 --> Post["bridge.postResult()"]
     Track2 --> Post
-    Post --> Rec["RunReport → output/runs/run_log.jsonl"]
 ```
-
-After every job the worker appends a structured record (score, action, error,
-`jdTextLen`, board, duration) to `output/runs/run_log.jsonl`. This durable per-job log
-is what the **run analyzer** reasons over — see [`tuner/run-analyzer`](tuner/run-analyzer/README.md).
 
 ### Tailoring subgraph — what it produces
 
@@ -204,8 +194,6 @@ All node-level model variables default to `qwen3.5:9b-q4_K_M`. Override per node
 |---|---|---|
 | `FIT_THRESHOLD` | `50` | Minimum fit score to trigger tailoring |
 | `DUPLICATE_WINDOW_DAYS` | `30` | Jobs seen within this window are skipped as duplicates |
-| `ATS_REFINE_ENABLED` | `true` | Re-run summary+bullet rewrites once with ATS feedback when the first pass scores below the refine threshold (keeps the better-scoring pass) |
-| `ATS_REFINE_THRESHOLD` | `80` | ATS overall score below which the refinement pass triggers |
 
 ### Gmail
 
@@ -229,59 +217,9 @@ All node-level model variables default to `qwen3.5:9b-q4_K_M`. Override per node
 | `CHROME_EXECUTABLE_PATH` | `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` (macOS) |
 | `CHROME_USER_DATA_DIR` | `~/Library/Application Support/Google/Chrome` (macOS) |
 | `CHROME_PROFILE_DIRECTORY` | `Default` |
-| `CHROME_CDP_ENDPOINT` | _(empty)_ — e.g. `http://localhost:9222` to use the persistent Chrome |
-| `CHROME_DEBUG_PORT` | `9222` |
-| `CDP_FORCE_DOMAINS` | _(empty)_ — comma-separated domains that always scrape via the CDP browser (e.g. `glassdoor.com`) |
 | `PLAYWRIGHT_TIMEOUT_MS` | `45000` |
 | `PLAYWRIGHT_HEADLESS` | `false` |
 | `PLAYWRIGHT_FALLBACK_ON_CAPTCHA` | `true` |
-
-#### Persistent Chrome over CDP (recommended)
-
-By default the scraper copies your Chrome profile into a temp dir and launches a throwaway
-browser **per job**, so LinkedIn's mid-visit session-cookie refreshes are discarded — the real
-profile slowly goes stale and gets signed out, and every cold launch looks like a bot.
-
-Instead, run **one** long-lived Chrome with a remote-debugging port and point the pipeline at it.
-It reuses a warm, logged-in session (one tab per domain), which sharply reduces sign-outs and
-CAPTCHAs.
-
-> **Dedicated profile required.** Current Chrome refuses `--remote-debugging-port` on the **Default**
-> profile dir ("DevTools remote debugging requires a non-default data directory"). So the debug
-> Chrome uses a separate `CHROME_CDP_USER_DATA_DIR` — it runs **alongside** your everyday Chrome,
-> and you sign into the job boards in it **once** (the login persists there).
-
-```bash
-# 1. Launch the dedicated debug Chrome (idempotent; coexists with your normal Chrome)
-scripts/launch-chrome-cdp.sh
-# 2. Confirm it's listening
-curl -s http://localhost:9222/json/version
-# 3. Enable it for the pipeline
-echo 'CHROME_CDP_ENDPOINT=http://localhost:9222' >> .env
-# 4. In the debug Chrome window, sign into LinkedIn (and any other boards) — one time
-# 5. Smoke-test the connection + login
-./gradlew run --args="--test-chrome https://www.linkedin.com/feed/"
-```
-
-`--test-chrome` connects over CDP, opens a probe tab (pass a URL to override the default), and
-reports whether the session looks authenticated — a quick check without running a full batch. With
-`CHROME_CDP_ENDPOINT` empty it just reports that CDP is disabled.
-
-To keep it up automatically, install the optional launch agent
-`scripts/com.jd.chrome-cdp.plist` (install/uninstall commands are in the file header). It runs
-`scripts/cdp-watchdog.sh` at login and every 60s: the watchdog polls the debug port and only
-(re)launches Chrome when it's actually down, so it recovers from a crash, a manual `Cmd-Q`, or a
-hung-but-alive Chrome within one interval. Because it relaunches on demand, `Cmd-Q` won't stick
-while it's loaded — `launchctl bootout` the agent to stop it.
-
-**What routes through the browser:** most sites are scraped over plain HTTP (fast, uses embedded
-schema.org JSON-LD). The CDP browser is used for **LinkedIn** (always), for pages the HTTP fetch
-finds **blocked or thin** (Cloudflare / 403 / JS-rendered SPA), and for any domain listed in
-**`CDP_FORCE_DOMAINS`** — a proactive list for sites that soft-block plain HTTP (e.g. Glassdoor)
-where waiting to detect a block isn't reliable.
-
-If the debug Chrome is unreachable, the scraper automatically falls back to the legacy
-copy-profile / clean-launch path and sends a one-time alert (see Alerts below).
 
 ## Skills (prompt files)
 
@@ -290,7 +228,7 @@ Prompt files live in `src/main/resources/skills/` and are loaded at runtime — 
 | File | Node | Purpose |
 |---|---|---|
 | `SCAN_SKILL.md` | `ScanEmailNode` | Email classification and field extraction |
-| `SCRAPE_SKILL.md` | `ScrapeJdNode` | Job-page structured extraction (prefers schema.org `JobPosting` JSON-LD when the page embeds it) |
+| `SCRAPE_SKILL.md` | `ScrapeJdNode` | Job-page structured extraction |
 | `SCORE_SKILL.md` | `ScoreFitNode` | Combined fit scoring + JD structure extraction (runtime-templated via `{{CANDIDATE_PROFILE}}`) |
 | `JD_EXTRACTION_SKILL.md` | `JdExtractionNode` | JD structure extraction (fallback when score_fit parse fails) |
 | `GAP_ANALYSIS_SKILL.md` | `GapAnalysisNode` | Skills gap table + keyword coverage score |
@@ -402,17 +340,8 @@ The pipeline uses OAuth 2.0 to authenticate with Gmail. Tokens are stored at `GM
 
 | Symptom | Fix |
 |---|---|
-| "LinkedIn session expired" warning / "Sign-in required" alert | Sign back in to the persistent Chrome (`scripts/launch-chrome-cdp.sh`); the pipeline reuses the session |
-| "Security verification" checkpoint | Manually complete in the persistent Chrome, then retry |
-| "Chrome debug instance unreachable" alert | Debug Chrome isn't running — `scripts/launch-chrome-cdp.sh` (scraping still falls back to the legacy path meanwhile). Install the `com.jd.chrome-cdp` launch agent to auto-recover within 60s. |
-
-### Alerts
-
-Operational alerts (a site needs sign-in, the debug Chrome is down, a pipeline timed out) are
-sent through `AlertService` to the same Discord/Telegram channels as job notifications — set
-`DISCORD_BOT_TOKEN`/`DISCORD_CHANNEL_ID` and/or `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`. With no
-channel configured, alerts are silent no-ops. Each distinct alert is de-duplicated per run so a
-recurring condition pings once, not once per job.
+| "LinkedIn session expired" warning | Re-authenticate Chrome profile used by `CHROME_PROFILE_DIRECTORY` |
+| "Security verification" checkpoint | Manually complete in Chrome, then retry |
 
 ## Project layout
 
@@ -426,7 +355,7 @@ src/main/kotlin/com/jd/pipeline/
 │   ├── EmailLabelingService.kt        # Gmail label / archive / star
 │   ├── CreateDraftReply.kt            # Recruiter draft reply
 │   └── commands/
-│       ├── BatchCommandHandler.kt     # --max-emails: ingest → submit (fire-and-forget)
+│       ├── BatchCommandHandler.kt     # --max-emails: ingest → submit → poll
 │       ├── SingleEmailCommandHandler.kt # --email: single email
 │       ├── JSearchCommandHandler.kt   # --jsearch: fetch → submit to queue
 │       ├── WorkerCommandHandler.kt    # --worker: drain bridge queue
@@ -445,7 +374,7 @@ src/main/kotlin/com/jd/pipeline/
 │   └── JobListing.kt                  # JSearch API response model
 ├── nodes/
 │   ├── ScanEmailNode.kt               # Email classification and field extraction
-│   ├── ScrapeJdNode.kt                # Job-page scraping (HTTP + Playwright/LinkedIn, schema.org JSON-LD)
+│   ├── ScrapeJdNode.kt                # Job-page scraping (HTTP + Playwright/LinkedIn)
 │   ├── SaveJobDescriptionNode.kt      # Persist JD text
 │   ├── CheckDuplicateNode.kt          # Supabase-backed dedup
 │   ├── ScoreFitNode.kt                # Combined fit scoring + JD structure extraction
@@ -475,7 +404,6 @@ src/main/kotlin/com/jd/pipeline/
     ├── Json.kt                        # Shared JSON helpers
     ├── NodeTimer.kt                   # Per-node LLM call timing
     ├── OutputUtils.kt                 # Output directory naming
-    ├── RunReport.kt                   # Per-job JSONL record for the run analyzer
     └── JobFormatter.kt                # Batch summary table formatter
 
 src/main/resources/
@@ -490,12 +418,6 @@ src/main/resources/
 config/
 ├── candidate_profile.template.json    # Committed schema reference
 └── candidate_profile.json             # Gitignored — produced by --init-profile
-
-tuner/
-├── scan-email-tuner/                  # Dataset-driven tuners (skill + PROMPT + data-set)
-├── scrape-jd-url-tuner/
-├── env-llm-tuner/                     # Recommends .env model assignments
-└── run-analyzer/                      # Runs a batch + LLM-analyzes the run (see its README)
 ```
 
 ## CI and test reports

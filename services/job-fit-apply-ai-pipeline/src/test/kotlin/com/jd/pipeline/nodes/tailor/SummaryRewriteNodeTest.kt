@@ -79,35 +79,4 @@ class SummaryRewriteNodeTest {
         assertNotNull(result.tailoredSummary)
         assertEquals("Rewritten summary.", result.tailoredSummary)
     }
-
-    @Test
-    @DisplayName("shingleOverlap detects parroting and clears fresh rewrites")
-    fun shingleOverlapDetection() {
-        val base = "Seasoned SDET leading mobile automation teams across large retail organisations"
-        assertTrue(SummaryRewriteNode.shingleOverlap(base, base) > 0.9)
-        assertTrue(
-            SummaryRewriteNode.shingleOverlap(
-                base,
-                "Staff engineer specialising in CI/CD pipeline ownership and cross-platform test frameworks"
-            ) < 0.2
-        )
-    }
-
-    @Test
-    @DisplayName("retries once when the draft parrots the base summary")
-    fun retriesWhenDraftParrots() {
-        val base = "Seasoned SDET leading mobile automation teams across large retail organisations"
-        val profile = baseProfile.copy(background = baseProfile.background.copy(summary = base))
-        var calls = 0
-        val mockLlm = LlmCaller {
-            calls++
-            if (calls == 1) base else "Staff engineer specialising in CI/CD pipeline ownership and cross-platform test frameworks"
-        }
-        val result = SummaryRewriteNode(llm = mockLlm).process(baseState.copy(candidateProfile = profile))
-        assertEquals(2, calls, "Expected one retry after a parroted draft")
-        assertEquals(
-            "Staff engineer specialising in CI/CD pipeline ownership and cross-platform test frameworks",
-            result.tailoredSummary
-        )
-    }
 }

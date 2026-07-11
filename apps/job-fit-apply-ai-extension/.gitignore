@@ -40,6 +40,3 @@ temp/
 
 # Chrome extension specific
 *.pem
-
-# Allure test artifacts
-allure-results/

@@ -3,7 +3,6 @@ package com.jd.pipeline.nodes.scan.digest
 import com.jd.pipeline.source.IntakeContext
 import com.jd.pipeline.state.JDState
 import org.jsoup.Jsoup
-import org.jsoup.nodes.Element
 import java.util.regex.Pattern
 
 object JobrightDigestStrategy : BoardDigestStrategy {
@@ -20,30 +19,16 @@ object JobrightDigestStrategy : BoardDigestStrategy {
         val doc = Jsoup.parse(emailHtml)
         val anchors = doc.select("a[href*=jobright.ai]")
         val jobs = mutableListOf<JDState>()
-        val seenHrefs = mutableSetOf<String>()
 
         for (anchor in anchors) {
             if (jobs.size >= MAX_JOBS_PER_EMAIL) break
             val href = cleanUrl(anchor.attr("abs:href").ifBlank { anchor.attr("href") })
             if (href.isBlank() || !href.contains("jobright.ai")) continue
-            if (!seenHrefs.add(href)) continue
             val fullText = anchor.text().replace(Regex("\\s+"), " ").trim()
             if (fullText.isBlank()) continue
-            val (parsedCompany, parsedRole) = parseJobRightTitleLine(fullText)
-            val parentText = anchor.parent()?.text()?.replace(Regex("\\s+"), " ")?.trim() ?: ""
-
-            // Single-job alert emails use a card layout: the anchor contains only the role title,
-            // while the company name and match % are in sibling/ancestor elements. When company is
-            // blank from the anchor text alone, fall back to the surrounding card context.
-            val (company, roleTitle) = if (parsedCompany.isNotBlank() && parsedRole.isNotBlank()) {
-                parsedCompany to parsedRole
-            } else {
-                val cardText = buildCardContext(anchor)
-                if (cardText.isNotBlank()) parseJobRightTitleLine(cardText)
-                else parsedCompany to parsedRole
-            }
-
+            val (company, roleTitle) = parseJobRightTitleLine(fullText)
             if (company.isBlank() || roleTitle.isBlank()) continue
+            val parentText = anchor.parent()?.text()?.replace(Regex("\\s+"), " ")?.trim() ?: ""
             val salary = extractJobRightSalary(fullText + " " + parentText)
             val location = extractJobRightLocation(fullText + " " + parentText)
             jobs.add(createParsedDigestJob(input, company, roleTitle, location, salary, href))
@@ -71,11 +56,7 @@ object JobrightDigestStrategy : BoardDigestStrategy {
             val percentMatch = Regex("""(\d{1,3}(?:\.\d+)?%)""").find(blockText) ?: continue
             val titleSectionStart = percentMatch.range.first
             val titleSection = blockText.substring(titleSectionStart)
-            val (parsedCompany, roleTitle) = parseJobRightTitleLine(titleSection)
-            // Notification format: "Acme just posted a 91% match Role 5 min ago" — the company
-            // lives in blockText *before* the % sign, not inside titleSection.
-            val company = if (parsedCompany.isNotBlank()) parsedCompany
-                          else extractNotificationCompany(blockText.substring(0, titleSectionStart))
+            val (company, roleTitle) = parseJobRightTitleLine(titleSection)
             if (company.isBlank() || roleTitle.isBlank()) continue
             val salaryLocationSection = blockText.substring(0, titleSectionStart)
             val salary = if (salaryLocationSection.contains("no salary", ignoreCase = true)) "" else extractJobRightSalary(salaryLocationSection)
@@ -83,16 +64,6 @@ object JobrightDigestStrategy : BoardDigestStrategy {
             jobs.add(createParsedDigestJob(input, company, roleTitle, location, salary, url))
         }
         return jobs
-    }
-
-    // Strips Jobright notification boilerplate ("just posted a", "posted a new") from the
-    // text that precedes the match-percentage to recover the bare company name.
-    private fun extractNotificationCompany(beforePct: String): String {
-        val stripped = beforePct
-            .replace(Regex("""\s+just\s+posted\s+.*$""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s+posted\s+a\s+.*$""", RegexOption.IGNORE_CASE), "")
-            .trim()
-        return if (stripped.isNotBlank()) stripped else extractJobRightCompany(beforePct.trim())
     }
 
     private fun parseJobRightTitleLine(line: String): Pair<String, String> {
@@ -139,11 +110,7 @@ object JobrightDigestStrategy : BoardDigestStrategy {
             Regex("""\d+\+\s*referrals?""", RegexOption.IGNORE_CASE),
             Regex("""\d+\s*(minutes?|hours?|days?)\s*ago""", RegexOption.IGNORE_CASE),
             Regex("""Be an early applicant""", RegexOption.IGNORE_CASE),
-            Regex("""APPLY\s*NOW""", RegexOption.IGNORE_CASE),
-            // Notification format: "91% match Role role 5 min ago" — strip leading "match " filler
-            Regex("""^match\s+""", RegexOption.IGNORE_CASE),
-            // Notification format appends " role" after the title ("Developer/DevOps Engineer role")
-            Regex("""\s+role\s*$""", RegexOption.IGNORE_CASE)
+            Regex("""APPLY\s*NOW""", RegexOption.IGNORE_CASE)
         )
         var result = roleTitle
         for (pattern in noisePatterns) result = pattern.replace(result, "")
@@ -167,18 +134,6 @@ object JobrightDigestStrategy : BoardDigestStrategy {
                 if (salary.contains("no salary", ignoreCase = true)) return ""
                 return salary
             }
-        }
-        return ""
-    }
-
-    // Walks up to 3 ancestor levels to collect the full card text for single-job alert emails,
-    // where the company and match% are siblings/ancestors of the job-link anchor.
-    private fun buildCardContext(anchor: Element): String {
-        var el: Element? = anchor.parent()
-        repeat(3) {
-            val candidate = el?.text()?.replace(Regex("\\s+"), " ")?.trim() ?: return@repeat
-            if (candidate.contains(Regex("""\d{1,3}%"""))) return candidate
-            el = el?.parent()
         }
         return ""
     }

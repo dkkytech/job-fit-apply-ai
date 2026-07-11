@@ -1,4 +1,4 @@
-/* popup.css — Job Fit Apply AI — JD Capture
+/* popup.css — OpenClaw JD Capture
    Aesthetic: industrial terminal / CLI-in-glass
    Fonts: JetBrains Mono + DM Sans
 */
@@ -262,17 +262,6 @@ html, body { width: 360px; background: var(--bg); color: var(--text); font-famil
   letter-spacing: 0.1em;
   color: var(--green);
   text-transform: uppercase;
-}
-
-.fit-badge {
-  margin-left: 8px;
-  padding: 1px 6px;
-  border: 1px solid var(--green-dim);
-  border-radius: 4px;
-  color: var(--green);
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.05em;
 }
 
 .artifact-links {

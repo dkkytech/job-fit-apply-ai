@@ -38,7 +38,3 @@ test-results/
 # Lockfiles (pick one per project)
 bun.lockb
 /services/.gradle
-
-# Kotlin/Eclipse compiled output (e.g. services/*/bin/main, bin/test)
-**/bin/
-**/.gradle/

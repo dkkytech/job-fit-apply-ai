@@ -50,58 +50,6 @@ fun Routing.configureRoutes() {
         call.respond(if (response.deduped) HttpStatusCode.OK else HttpStatusCode.Accepted, response)
     }
 
-    // ── Submit raw email (Poller → Processor scans/scrapes it) ─────────────────
-
-    post("/api/emails") {
-        val body = call.receive<SubmitEmailRequest>()
-        if (body.body.isBlank()) {
-            call.respond(HttpStatusCode.UnprocessableEntity, ErrorResponse("email body must not be empty"))
-            return@post
-        }
-        val key = body.idempotency_key ?: body.message_id
-        val existing = findActiveDuplicate(null, key)
-        if (existing != null) {
-            call.respond(HttpStatusCode.OK, SubmitJobResponse(existing, JobStatus.PENDING.value, deduped = true))
-            return@post
-        }
-        val jobId = enqueue(
-            jdJson         = Json.encodeToString(body),
-            jobUrl         = null,
-            idempotencyKey = key,
-            type           = WorkItemType.EMAIL_RAW,
-            messageId      = body.message_id,
-        )
-        log.info("Email enqueued: $jobId (${body.subject})")
-        call.respond(HttpStatusCode.Accepted, SubmitJobResponse(jobId, JobStatus.PENDING.value))
-    }
-
-    // ── Submit raw page capture (browser extension → Processor LLM-extracts it) ─
-
-    post("/api/pages") {
-        val body = call.receive<SubmitPageCaptureRequest>()
-        if (body.text.length < 200) {
-            call.respond(
-                HttpStatusCode.UnprocessableEntity,
-                ErrorResponse("captured page text must be at least 200 characters"),
-            )
-            return@post
-        }
-        val key = body.idempotency_key ?: body.url
-        val existing = findActiveDuplicate(body.url, key)
-        if (existing != null) {
-            call.respond(HttpStatusCode.OK, SubmitJobResponse(existing, JobStatus.PENDING.value, deduped = true))
-            return@post
-        }
-        val jobId = enqueue(
-            jdJson         = Json.encodeToString(body),
-            jobUrl         = body.url,
-            idempotencyKey = key,
-            type           = WorkItemType.JD_PAGE_RAW,
-        )
-        log.info("Page capture enqueued: $jobId (${body.title.ifBlank { body.url }})")
-        call.respond(HttpStatusCode.Accepted, SubmitJobResponse(jobId, JobStatus.PENDING.value))
-    }
-
     // ── Submit job (batch) ────────────────────────────────────────────────────
 
     post("/api/jobs/batch") {
@@ -161,8 +109,8 @@ fun Routing.configureRoutes() {
             return@get
         }
 
-        log.info("Claimed job: ${claimed.id} (${claimed.type})")
-        call.respond(ClaimResponse(job_id = claimed.id, type = claimed.type, jd_record = jdRecordElement))
+        log.info("Claimed job: ${claimed.id}")
+        call.respond(ClaimResponse(job_id = claimed.id, jd_record = jdRecordElement))
     }
 
     post("/api/jobs/{job_id}/result") {
@@ -227,50 +175,5 @@ fun Routing.configureRoutes() {
         }
         call.response.header(HttpHeaders.ContentDisposition, "attachment; filename=\"cover_letter.txt\"")
         call.respondFile(file)
-    }
-
-    // ── Gmail write-back feed (Poller drains completed jobs) ───────────────────
-
-    get("/api/jobs/completed") {
-        val since = call.request.queryParameters["since"]?.toLongOrNull() ?: 0L
-        val limit = call.request.queryParameters["limit"]?.toIntOrNull()?.coerceIn(1, 200) ?: 50
-        // all=true → full event stream (ignores writeback_done) for cursor consumers like the Notifier.
-        val all = call.request.queryParameters["all"]?.toBooleanStrictOrNull() ?: false
-        call.respond(completedJobs(since, limit, all))
-    }
-
-    // Current max completed_seq — cursor consumers seed here on cold start to skip history.
-    get("/api/jobs/completed/head") {
-        call.respond(mapOf("max_seq" to latestCompletedSeq()))
-    }
-
-    post("/api/jobs/{job_id}/writeback-done") {
-        val jobId = call.parameters["job_id"]!!
-        if (markWritebackDone(jobId)) {
-            call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
-        } else {
-            call.respond(HttpStatusCode.NotFound, ErrorResponse("Job not found"))
-        }
-    }
-
-    // ── Tracks (backlog UI data — Postgres `tracks` table) ─────────────────────
-
-    get("/api/tracks") {
-        call.respond(TracksStore.list())
-    }
-
-    post("/api/tracks/{id}/status") {
-        val id = call.parameters["id"]?.toIntOrNull()
-            ?: return@post call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid track id"))
-
-        val req = call.receive<TrackStatusUpdate>()
-        if (req.status !in TracksStore.ALLOWED_STATUSES) {
-            return@post call.respond(HttpStatusCode.UnprocessableEntity, ErrorResponse("Invalid status: ${req.status}"))
-        }
-
-        if (!TracksStore.updateStatus(id, req.status)) {
-            return@post call.respond(HttpStatusCode.NotFound, ErrorResponse("Track $id not found"))
-        }
-        call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
     }
 }

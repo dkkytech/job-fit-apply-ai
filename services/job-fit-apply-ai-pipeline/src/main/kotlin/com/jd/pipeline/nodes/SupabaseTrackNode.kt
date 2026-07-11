@@ -1,7 +1,7 @@
 package com.jd.pipeline.nodes
 
-import com.jd.pipeline.client.GatewayProvider
-import com.jd.pipeline.client.SupabaseGateway
+import com.jd.pipeline.client.SupabaseClient
+import com.jd.pipeline.config.Config
 import com.jd.pipeline.state.JDState
 import com.jd.pipeline.state.PipelineAction
 import com.jd.pipeline.state.emailIntake
@@ -14,27 +14,27 @@ import com.jd.pipeline.state.emailIntake
  * Parses the real row id from the return=representation response and stores it in
  * trackId for downstream reference.
  */
-class SupabaseTrackNode(
-    private val supabase: SupabaseGateway = GatewayProvider.active
-) : Node<JDState> {
+class SupabaseTrackNode : Node<JDState> {
 
     override fun process(input: JDState): JDState {
         println("[supabase_track] Tracking: ${input.roleTitle} @ ${input.company}")
 
-        if (!supabase.isConfigured()) {
+        if (!SupabaseClient.isConfigured()) {
             return input.copy(error = "SUPABASE_URL not configured in .env")
         }
 
         return try {
             val record = buildRecord(input)
-            val row = supabase.insert("tracks", record)
+            val row = SupabaseClient.insert("tracks", record)
             val id = row.path("id").asInt(0).takeIf { it > 0 }
 
+            val trackUrl = "${Config.SUPABASE_PROJECT_URL}/editor?schema=public&table=tracks"
             println("[supabase_track] Tracked successfully (id=${id ?: "unknown"})")
 
             input.copy(
                 isSupabaseTracked = true,
-                trackId = id
+                trackId = id,
+                trackUrl = trackUrl
             )
         } catch (e: Exception) {
             System.err.println("[supabase_track] ERROR: ${e.message}")

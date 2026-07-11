@@ -35,9 +35,7 @@ class ScanEmailNode(
 
     companion object {
         val MAX_JOBS_PER_EMAIL = com.jd.pipeline.nodes.scan.digest.MAX_JOBS_PER_EMAIL
-        // 10k chars ≈ 2.5k tokens. Recruiter JDs commonly run 5-8k chars; the previous 4k cap
-        // truncated Requirements/Qualifications sections, degrading scoring and tailoring downstream.
-        val EMAIL_BODY_MAX_CHARS = 10_000
+        val EMAIL_BODY_MAX_CHARS = 4_000
 
         val JOB_SIGNAL_PATTERN: Pattern = Pattern.compile(
             "\\b(engineer|developer|dev|position|role|apply|compensation|salary|\\btc\\b|" +

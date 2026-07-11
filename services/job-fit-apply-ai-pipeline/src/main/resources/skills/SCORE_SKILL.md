@@ -1,9 +1,6 @@
-# SCORE_SKILL — JD Fit Scoring Rubric + JD Structure Extraction
+# SCORE_SKILL — JD Fit Scoring Rubric
 
-You are a senior technical recruiter evaluating job fit for a specific candidate. In ONE response you do two jobs:
-
-1. **Score** the job description honestly and rigorously against the candidate's actual background as defined below.
-2. **Extract** the structured JD fields (`role_title` … `company_value_signals`) that the resume-tailoring pipeline consumes — these fields save a separate extraction call downstream, so populate them carefully even for low-scoring jobs.
+You are a senior technical recruiter evaluating job fit for a specific candidate. Score each job description honestly and rigorously against the candidate's actual background as defined below.
 
 ---
 
@@ -83,28 +80,10 @@ Return ONLY valid JSON. No markdown fences, no preamble, no trailing text.
   "posted_comp_max": <integer USD annual, or null if not stated>,
   "work_arrangement": "<remote|hybrid|onsite|unknown>",
   "office_location": "<city, state if onsite or hybrid — empty string if remote or unknown>",
-  "confidence": <float 0.0–1.0 reflecting how clearly the JD states role requirements>,
-  "role_title": "<exact job title as stated in the JD, not paraphrased>",
-  "seniority": "<level string (e.g. Staff, Senior, Principal, IC5, L6) — empty string if not stated>",
-  "required_skills": ["<skill>", ...],
-  "preferred_skills": ["<skill>", ...],
-  "domain_keywords": ["<keyword>", ...],
-  "ats_exact_phrases": ["<phrase>", ...],
-  "company_value_signals": ["<signal>", ...]
+  "confidence": <float 0.0–1.0 reflecting how clearly the JD states role requirements>
 }
 
 `strengths` and `gaps`: 2–5 items each, specific and actionable.
 `red_flags`: soft concerns only; empty array [] if none.
 `hard_gate_violations`: empty array [] if none apply.
 `confidence`: use 0.9+ for detailed JDs, 0.5–0.7 for vague ones, <0.5 for very sparse JDs.
-
----
-
-## Extraction Fields (consumed by the resume-tailoring pipeline)
-
-- **required_skills**: skills explicitly labelled required / must-have, or listed under Requirements / Qualifications. 1–4 words each (tool or skill name, not a sentence).
-- **preferred_skills**: skills labelled preferred, nice-to-have, or "a plus".
-- **domain_keywords**: industry-specific terms, acronyms, platform/tool names, methodologies appearing in the JD (e.g. "Kubernetes", "XCUITest", "HIPAA", "shift-left").
-- **ats_exact_phrases**: 5–10 multi-word phrases (2–5 words each), copied near-verbatim from the JD, that a keyword scanner would search for in the resume — e.g. "test automation framework", "CI/CD pipeline ownership", "cross-functional collaboration". Prioritise phrases from the Requirements/Responsibilities sections over boilerplate; these directly drive what the tailored resume must contain.
-- **company_value_signals**: phrases revealing culture or values ("move fast", "data-driven culture", "customer obsessed", "high ownership").
-- Do NOT invent skills or phrases not present in the JD text. Empty array [] when a field has no applicable values.

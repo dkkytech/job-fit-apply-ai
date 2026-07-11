@@ -1,116 +1,252 @@
-# Job Fit Apply AI — JD Capture (Chrome Extension)
+# OpenClaw JD Capture — Chrome Extension
 
-Capture the job posting you're viewing — **in your own authenticated browser session** — and
-send its rendered content to the Job Fit Apply AI pipeline, which extracts the job description
-server-side and generates a tailored resume + cover letter.
+Extracts job descriptions from any job board and ships them to your OpenClaw pipeline for resume and cover letter generation.
 
-## Why capture instead of scrape?
+## Features
 
-The server-side scraper can't see pages behind a login (LinkedIn, Workday, internal ATS portals).
-Your browser already rendered the page with your session, so the extension captures the visible
-content and ships **that** to the Bridge. The Processor then LLM-extracts the JD from the captured
-text — no per-site extractors, works on any layout, and auth-gated pages just work.
+- **Smart Extraction** — Automatically detects and extracts job descriptions from 13+ major ATS platforms
+- **Multiple Input Methods** — Use the toolbar popup or right-click context menu
+- **Real-time Progress** — Track the 4-stage pipeline: Extract → Submit → Generate → Done
+- **Download Artifacts** — Get resume and cover letter PDFs directly from the extension
+- **Polling Support** — Automatic status checking with configurable intervals
 
-## How it works
+## Supported Job Boards
 
-```
-You click the extension on a job page
-        │
-        ▼
-Extension captures visible content  ──►  POST /api/pages { url, title, text }   (Bridge)
-(Readability, falling back to innerText)                     │
-                                                             ▼
-                                       enqueued as JD_PAGE_RAW
-                                                             │
-                                                             ▼
-Processor claims it → LLM-extracts the JD (dual-mode ScrapeJdNode, no fetch)
-        → scores fit → tailors resume → cover letter → PDF → uploads artifacts
-                                                             │
-Extension polls GET /api/jobs/{id}  ◄────────────────────────┘
-        → on "done", offers the resume PDF + cover letter for download
-```
+| Site | Extractor |
+|------|-----------|
+| greenhouse.io | greenhouse |
+| lever.co | lever |
+| workday.com / myworkdayjobs.com | workday |
+| linkedin.com | linkedin |
+| indeed.com | indeed |
+| glassdoor.com | glassdoor |
+| ashbyhq.com | ashby |
+| workable.com | workable |
+| smartrecruiters.com | smartrecruiters |
+| icims.com | icims |
+| bamboohr.com | bamboohr |
+| jazz.co | jazzhr |
+| *All other sites* | generic |
 
-## Install (unpacked, development)
+## Prerequisites
+
+- Google Chrome browser (version 88 or higher for MV3 support)
+- Node.js 18+ (for development and testing)
+- Access to an OpenClaw Bridge API instance
+
+## Installation
+
+### Development (Unpacked)
 
 1. Open `chrome://extensions`
-2. Enable **Developer mode**
-3. **Load unpacked** → select this folder (`apps/job-fit-apply-ai-extension`)
-4. Pin the 🎯 icon to your toolbar
+2. Enable **Developer mode** (toggle in top right)
+3. Click **Load unpacked** → select this project folder
+4. Pin the extension to your toolbar for easy access
 
-`vendor/Readability.js` (Mozilla Readability, vendored) ships with the extension — no build step.
+### Production Build
+
+```bash
+# Install dependencies
+npm install
+
+# Build for production
+npm run build
+```
+
+The production build will be available in the `dist/` folder as a `.zip` file.
 
 ## Usage
 
-1. Open a job posting (any site, including ones you're logged into).
-2. Click the 🎯 toolbar icon → **Capture this job page** (or right-click → *Send this job page to
-   Job Fit Apply AI*).
-3. Watch the pipeline: **Capture → Submit → Generate → Done**.
-4. Download the resume PDF and cover letter when they're ready.
+### Method 1: Toolbar Popup
 
-If the page isn't a job posting (or the fit is too low to tailor), the extension says so instead of
-producing documents.
+1. Navigate to any job listing page
+2. Click the 🦞 extension icon in your toolbar
+3. Review the extracted job description
+4. Click **Generate Resume & Cover Letter**
+5. Wait for processing to complete
+6. Download your artifacts when ready
 
-## Configuration — `config.js`
+### Method 2: Context Menu
+
+1. Navigate to any job listing page
+2. Right-click anywhere on the page
+3. Select **Send to OpenClaw → Generate Resume**
+
+### Pipeline Stages
+
+The extension displays real-time progress through these stages:
+
+| Stage | Description |
+|-------|-------------|
+| Extract | Parsing job description from the page |
+| Submit | Sending data to Bridge API |
+| Generate | Server-side resume/cover letter generation |
+| Done | Artifacts ready for download |
+
+## Configuration
+
+Edit `config.js` to customize behavior:
 
 ```javascript
-export const BRIDGE_API_URL       = 'http://…:8765'; // Bridge endpoint (tailnet)
-export const POLL_INTERVAL_MS     = 5_000;           // status poll cadence
-export const POLL_TIMEOUT_MS      = 300_000;         // 5-minute hard timeout
-export const MAX_CAPTURE_CHARS    = 100_000;         // payload cap (server truncates for the LLM)
-export const MIN_READABILITY_CHARS = 400;            // below this, use innerText instead of Readability
-export const MIN_CAPTURE_CHARS    = 200;             // must match the bridge's /api/pages floor
+// Bridge API endpoint
+const BRIDGE_API_URL = 'http://your-api-endpoint:8765';
+
+// Polling configuration (in milliseconds)
+const POLL_INTERVAL_MS = 5000;  // How often to check status
+const POLL_TIMEOUT_MS = 300000; // 5 minutes hard timeout
+
+// Extraction settings
+const MIN_JD_CHARS = 150;  // Minimum characters for valid JD
 ```
 
-## Bridge API contract
+### Environment Variables
 
-### POST `/api/pages`
+For sensitive configuration, create a `.env.local` file:
 
-Submit a captured page. `text` must be ≥ 200 chars (else `422`). Dedup is by `url`.
+```bash
+BRIDGE_API_URL=http://your-api-endpoint:8765
+POLL_INTERVAL_MS=5000
+POLL_TIMEOUT_MS=300000
+```
 
+## Project Structure
+
+```
+.
+├── manifest.json          # Chrome extension manifest (MV3)
+├── config.js              # Configuration and constants
+├── background.js          # Service worker: menus, API calls, polling
+├── content_script.js      # Page-injected listener for extraction
+├── extractors/
+│   └── jd_extractor.js    # Smart per-site JD extraction logic
+├── popup/
+│   ├── popup.html         # Extension popup UI
+│   ├── popup.css          # Popup styling
+│   └── popup.js           # Popup logic
+├── icons/                 # Extension icons (16/32/48/128px)
+├── tests/                 # Test suite
+│   ├── setup.js           # Test configuration
+│   ├── content_script.test.js
+│   └── extractors/
+│       └── jd_extractor.test.js
+└── .github/
+    └── workflows/         # CI/CD configuration
+```
+
+## Bridge API Contract
+
+### POST /api/jobs
+
+Submit a new job for processing.
+
+**Request:**
 ```json
-{ "url": "https://…/job/123", "title": "Senior SDET — Acme", "text": "<visible page text>" }
+{
+  "jd_text": "Job description text...",
+  "title": "Software Engineer",
+  "company": "Acme Corp",
+  "location": "Seattle, WA",
+  "url": "https://example.com/job/123",
+  "site": "greenhouse.io"
+}
 ```
 
-Response `202` (new) / `200` (deduped): `{ "job_id": "…", "status": "pending", "deduped": false }`.
-
-### GET `/api/jobs/{job_id}`
-
-`status` is `pending | claimed | done | error`.
-
-- **pending / claimed** → status only (the extension synthesizes progress text; there is no
-  `progress_message` field).
-- **done** → `fit_score`, `pipeline_action`, and `artifacts { resume_pdf, cover_letter_txt }`
-  (URLs are **host-relative** — the extension prepends `BRIDGE_API_URL`). A `done` job with **no**
-  artifacts means the page wasn't a usable job posting.
-- **error** → `error` message.
-
-## Project structure
-
-```
-manifest.json          # MV3 manifest (no content_scripts — capture is injected on demand)
-config.js              # constants
-background.js          # service worker: capture → POST /api/pages → poll → artifacts
-vendor/Readability.js  # Mozilla Readability (vendored, exposes globalThis.Readability)
-popup/                 # popup UI (html/css/js)
-icons/                 # 16/32/48/128 icons
-tests/                 # jest tests (background.test.js, setup.js)
+**Response:**
+```json
+{
+  "job_id": "abc123"
+}
 ```
 
-Capture is performed by injecting `vendor/Readability.js` then a self-contained function via
-`chrome.scripting.executeScript` on the active tab (`activeTab` permission — no `<all_urls>`).
+### GET /api/jobs/{job_id}
+
+Check job status and retrieve results.
+
+**In-Progress Response:**
+```json
+{
+  "status": "processing",
+  "progress_message": "Scoring JD..."
+}
+```
+
+**Completed Response:**
+```json
+{
+  "status": "complete",
+  "title": "Software Engineer",
+  "artifacts": {
+    "resume_pdf": "http://api:8765/api/jobs/abc123/resume.pdf",
+    "cover_letter_txt": "http://api:8765/api/jobs/abc123/cover_letter.txt"
+  }
+}
+```
+
+**Error Response:**
+```json
+{
+  "status": "error",
+  "error": "Failed to parse job description"
+}
+```
 
 ## Testing
 
 ```bash
+# Install dependencies
 npm install
+
+# Run all tests
 npm test
+
+# Run tests with coverage report
+npm run test:coverage
+
+# Run tests in watch mode (development)
+npm run test:watch
 ```
 
-## Related
+### Writing Tests
 
-- [`services/job-fit-apply-ai-bridge`](../../services/job-fit-apply-ai-bridge) — Bridge API (`POST /api/pages`, queue, artifact store)
-- [`services/job-fit-apply-ai-pipeline`](../../services/job-fit-apply-ai-pipeline) — Processor: `JD_PAGE_RAW` extraction (dual-mode `ScrapeJdNode`) + resume/cover-letter generation
+- Unit tests for extractors are in `tests/extractors/`
+- Integration tests for content script messaging are in `tests/content_script.test.js`
+- Test setup is configured in `tests/setup.js`
+
+## Troubleshooting
+
+### Extension not loading
+
+1. Ensure you're in Chrome developer mode
+2. Click "Reload" on the extension page after changes
+3. Check the Extensions Service Worker console for errors
+
+### Extraction failing
+
+1. Verify the page has a job description visible
+2. Check that `MIN_JD_CHARS` threshold is appropriate
+3. Try using the generic extractor for unsupported sites
+4. Review browser console for extraction errors
+
+### API connection issues
+
+1. Verify `BRIDGE_API_URL` in `config.js` is correct
+2. Ensure the Bridge API server is running
+3. Check CORS settings on the API server
+4. Increase `POLL_TIMEOUT_MS` if network is slow
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ## License
 
-MIT.
+This project is licensed under the MIT License.
+
+## Related
+
+- [OpenClaw Bridge API](https://github.com/your-org/openclaw-bridge) — Backend service
+- [OpenClaw Resume Generator](https://github.com/your-org/openclaw-resume-gen) — Resume generation engine

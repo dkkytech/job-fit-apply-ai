@@ -1,16 +1,16 @@
-Use the tuner dataset in /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/tuner/scrape-jd-url-tuner/data-set as the corpus for ScrapeJdNode tuning.
+Use the tuner dataset in /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/tuner/scrape-jd-url-tuner/data-set as the corpus for ScrapeJdNode tuning.
 
 Goal:
-Improve /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/src/main/kotlin/com/jd/pipeline/nodes/ScrapeJdNode.kt and /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/src/main/resources/skills/SCRAPE_SKILL.md until ScrapeJdNode accurately and efficiently scrapes clean job description data from job URLs across multiple job boards.
+Improve /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/src/main/kotlin/com/jd/pipeline/nodes/ScrapeJdNode.kt and /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/src/main/resources/skills/SCRAPE_SKILL.md until ScrapeJdNode accurately and efficiently scrapes clean job description data from job URLs across multiple job boards.
 
 Instructions:
-1. Treat every file in /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/tuner/scrape-jd-url-tuner/data-set as a tuner case.
+1. Treat every file in /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/tuner/scrape-jd-url-tuner/data-set as a tuner case.
 2. Each tuner file contains structured fields (job_url, company, role_title, location, salary_range, email_jd_text, expected_jd_text).
    - Dataset files are now in JSON format (preferred). Legacy `.txt` files are still supported for backward compatibility.
    - Copy `template.json` when adding a new dataset file.
 3. For each tuner file, run:
    ./gradlew run --args='--scrapetuner <absolute-file-path> --max-iterations 5'
-4. Review the generated output under /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/output/scrape_tuner/.
+4. Review the generated output under /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/output/scrape_tuner/.
 5. Compare the scraped jd_text, role_title, company, location, and salary_range against:
    - The expected_jd_text in the dataset file (if populated).
    - The dataset company/role_title/location as a sanity check.

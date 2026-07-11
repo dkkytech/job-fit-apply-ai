@@ -29,7 +29,7 @@ You will receive:
 - For `yoe_required`: extract the number only if explicitly stated (e.g. "5+ years" → 5). Otherwise `null`.
 - For `remote_policy`: use `"remote"`, `"hybrid"`, `"onsite"`, or `"unknown"`.
 - For `tech_stack`: list every tool, language, framework, and platform explicitly mentioned. Include acronyms as written (e.g. "CI/CD", "XCTest", "Playwright", "K8s").
-- For `jd_text`: return the cleaned job description text — strip recruiter boilerplate, email signatures, unsubscribe footers, and navigation links. Copy the JD content itself **verbatim**: do not summarise, shorten, or reword it. Every requirement, responsibility, and qualification line must appear in full, and all tech/tool mentions must be preserved exactly — downstream scoring and resume tailoring match against this text word-for-word.
+- For `jd_text`: return the cleaned job description text — strip recruiter boilerplate, email signatures, unsubscribe footers, and navigation links. Preserve all requirements, responsibilities, qualifications, and tech mentions.
 - For `job_url`: extract the direct URL to the job posting or application page if one is explicitly present in the content (e.g. "Apply here: https://…", an ATS link). Use `null` if no URL is present.
 - Reject generic company homepages, scheduling links, unsubscribe links, and recruiter profile links as `job_url`.
 - If multiple URLs are present, choose the URL that most directly represents the job posting or application page.
@@ -39,9 +39,6 @@ You will receive:
 - Ignore tracking, analytics, unsubscribe, and unrelated marketing metadata when reading hidden content.
 - If the email names multiple jobs with no single primary role, return `is_job_posting: false`.
 - Do not merge multiple jobs into one synthetic posting. If the email is really a multi-job digest, leave it for board-specific digest parsing instead of inventing a combined company/title/location.
-- **Forwarded messages**: If the email contains a "---------- Forwarded message ---------" header, treat the forwarded content as the primary job description source. The outer envelope message is recruiter commentary, not the JD.
-- **Conversation threads**: If the email is a reply thread showing multiple messages, focus on the most recent message and any attached or quoted job description. Earlier turns in the thread are context, not the JD, unless no JD appears in the latest message.
-- **Offer acceptance / onboarding logistics**: Emails confirming an accepted offer, providing onboarding instructions, shipping tracking numbers, pay rate confirmations, Beeline/MSP request numbers, or equipment delivery notices are `is_job_posting: false`.
 
 ## Output Format
 

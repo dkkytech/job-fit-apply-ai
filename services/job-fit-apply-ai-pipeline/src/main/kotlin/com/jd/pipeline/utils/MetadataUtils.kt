@@ -21,7 +21,6 @@ object MetadataUtils {
         is IntakeContext.Email -> "email"
         is IntakeContext.Api -> "api"
         is IntakeContext.Synthetic -> "synthetic"
-        is IntakeContext.WebCapture -> "extension"
         null -> "unknown"
     }
 
@@ -82,8 +81,6 @@ object MetadataUtils {
             if (state.fitScore != null) put("fit_score", state.fitScore) else putNull("fit_score")
             put("fit_threshold", Config.FIT_THRESHOLD)
             put("pipeline_action", state.pipelineAction.asDbValue() as String)
-            put("resume_generation", resumeGenerationDisplay(state))
-            set<com.fasterxml.jackson.databind.JsonNode>("resume_degraded_nodes", mapper.valueToTree(state.tailoringDegradedNodes))
             putNullable("skipped_reason", state.skippedReason.ifEmpty { null })
             putNullable("job_posting_url", state.jobUrl.ifEmpty { null })
             putNull("job_board_url")
@@ -91,6 +88,7 @@ object MetadataUtils {
             putNullable("tailored_resume_url", resumeUrl)
             putNullable("tailored_cover_letter_url", coverLetterUrl)
             if (state.trackId != null) put("supabase_track_id", state.trackId) else putNull("supabase_track_id")
+            putNullable("supabase_track_url", state.trackUrl.ifEmpty { null })
             put("is_duplicate", state.isDuplicate)
             putNullable("email_subject", state.emailIntake?.subject?.ifEmpty { null })
             putNullable("email_from", state.emailIntake?.from?.ifEmpty { null })
@@ -108,13 +106,6 @@ object MetadataUtils {
 
     private fun com.fasterxml.jackson.databind.node.ObjectNode.putNullable(fieldName: String, value: String?) {
         if (value != null) put(fieldName, value) else putNull(fieldName)
-    }
-
-    /** Whether the tailored resume was fully generated or short-circuited (fell back on some nodes). */
-    private fun resumeGenerationDisplay(state: JDState): String = when {
-        state.pipelineAction != PipelineAction.TAILOR -> "N/A (not tailored)"
-        state.tailoringDegradedNodes.isEmpty()        -> "✅ Fully generated"
-        else -> "⚠️ Short-circuited — fell back on: ${state.tailoringDegradedNodes.joinToString(", ")}"
     }
 
     private fun writeMarkdown(
@@ -160,6 +151,11 @@ object MetadataUtils {
             appendLine("| Tailored Resume | ${linkOrNA(resumeUrl, "PDF")} |")
             appendLine("| Cover Letter | ${linkOrNA(coverLetterUrl, "TXT")} |")
             appendLine("| Output Directory | ${linkOrNA(outputDirUrl)} |")
+            val supabaseLink = if (state.trackUrl.isNotEmpty()) {
+                val label = if (state.trackId != null) "Row #${state.trackId}" else "View"
+                "[${label}](${state.trackUrl})"
+            } else "N/A"
+            appendLine("| Supabase | $supabaseLink |")
             appendLine()
 
 
@@ -173,7 +169,6 @@ object MetadataUtils {
             appendLine("| Fit Threshold | ${Config.FIT_THRESHOLD} |")
             appendLine("| Skipped Reason | $skippedDisplay |")
             appendLine("| Is Duplicate | $isDuplicateDisplay |")
-            appendLine("| Resume Generation | ${resumeGenerationDisplay(state)} |")
             appendLine()
 
             // Fit Analysis (only if scored)

@@ -73,52 +73,6 @@ class JobrightDigestStrategyTest {
             val jobs = JobrightDigestStrategy.expand(parent, email(rawBody = body))
             assertEquals(0, jobs.size)
         }
-
-        @Test
-        @DisplayName("notification format: 'Company just posted a X% match Role role Y min ago'")
-        fun notificationFormatExtractsCompanyAndRole() {
-            val body = """
-                Profesionistas sin fronteras just posted a 91% match Developer/DevOps Engineer role 18 minutes ago
-                https://jobright.ai/jobs/info/abc789
-            """.trimIndent()
-            val jobs = JobrightDigestStrategy.expand(parent, email(rawBody = body))
-            assertEquals(1, jobs.size)
-            assertEquals("Profesionistas sin fronteras", jobs[0].company)
-            assertEquals("Developer/DevOps Engineer", jobs[0].roleTitle)
-            assertTrue(jobs[0].jobUrl.contains("abc789"))
-        }
-
-        @Test
-        @DisplayName("notification format: company with no industry suffix is still extracted")
-        fun notificationFormatNoIndustrySuffix() {
-            val body = "Acme Corp just posted a 85% match Software Engineer role 5 minutes ago\nhttps://jobright.ai/jobs/info/xyz"
-            val jobs = JobrightDigestStrategy.expand(parent, email(rawBody = body))
-            assertEquals(1, jobs.size)
-            assertEquals("Acme Corp", jobs[0].company)
-            assertEquals("Software Engineer", jobs[0].roleTitle)
-        }
-    }
-
-    @Nested
-    @DisplayName("expand — HTML single-job alert card format")
-    inner class ExpandHtmlCardFormat {
-
-        @Test
-        @DisplayName("card layout: role in anchor, company and % in ancestor element")
-        fun cardLayoutExtractsFromAncestorContext() {
-            val html = """
-                <html><body>
-                  <div class="job-card">
-                    <p>Profesionistas sin fronteras · 91% match</p>
-                    <a href="https://jobright.ai/jobs/info/card123">Developer/DevOps Engineer</a>
-                  </div>
-                </body></html>
-            """.trimIndent()
-            val jobs = JobrightDigestStrategy.expand(parent, email(htmlBody = html))
-            assertEquals(1, jobs.size)
-            assertEquals("Profesionistas sin fronteras", jobs[0].company)
-            assertEquals("Developer/DevOps Engineer", jobs[0].roleTitle)
-        }
     }
 
     @Nested

@@ -1,17 +1,17 @@
-Use the tuner dataset in /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/tuner/scan-email-tuner/data-set as the training and test corpus for ScanEmail tuning.
+Use the tuner dataset in /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/tuner/scan-email-tuner/data-set as the training and test corpus for ScanEmail tuning.
 
 Goal:
-Improve /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/src/main/kotlin/com/jd/pipeline/nodes/ScanEmailNode.kt and /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/src/main/resources/skills/SCAN_SKILL.md until the scan pipeline correctly extracts all visible company info, role titles, locations, salary/compensation info when present, clean job posting URLs, and any useful hidden job description data embedded in the email.
+Improve /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/src/main/kotlin/com/jd/pipeline/nodes/ScanEmailNode.kt and /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/src/main/resources/skills/SCAN_SKILL.md until the scan pipeline correctly extracts all visible company info, role titles, locations, salary/compensation info when present, clean job posting URLs, and any useful hidden job description data embedded in the email.
 
 Instructions:
-1. Treat every file in /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/tuner/scan-email-tuner/data-set as a tuner case.
+1. Treat every file in /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/tuner/scan-email-tuner/data-set as a tuner case.
 2. Each tuner file’s first line is the email subject. The remaining content is the expected visible job data from Gmail.
 3. For each tuner file, run:
    ./gradlew run --args='--scantuner <absolute-file-path>'
-4. Review the generated output under /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/output/scan_tuner/.
+4. Review the generated output under /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/output/scan_tuner/.
 5. Compare the extracted results against the expected visible data in the tuner file.
-6. Update /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/src/main/kotlin/com/jd/pipeline/nodes/ScanEmailNode.kt to improve board-specific parsing and organize the logic by domain/job board.
-7. Update /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/src/main/resources/skills/SCAN_SKILL.md to improve direct-email extraction behavior where appropriate.
+6. Update /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/src/main/kotlin/com/jd/pipeline/nodes/ScanEmailNode.kt to improve board-specific parsing and organize the logic by domain/job board.
+7. Update /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/src/main/resources/skills/SCAN_SKILL.md to improve direct-email extraction behavior where appropriate.
 8. Inspect non-visible email content too, including hidden HTML text, embedded metadata, JSON blobs, schema blocks, and script data. Use that hidden content to recover missing job description text and missing structured fields.
 9. Visible Gmail content is the source of truth for company, role title, location, compensation, and the primary job URL. Hidden/non-visible content may enrich or fill gaps, but must not override a clearly visible value.
 10. Ignore tracking, analytics, unsubscribe, and unrelated marketing metadata.

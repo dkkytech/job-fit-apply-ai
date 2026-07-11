@@ -1,6 +1,6 @@
-Run the ScrapeJdTuner tuner skill at /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/tuner/scrape-jd-url-tuner/SCRAPE_JD_URL_TUNER_SKILL.md.
+Run the ScrapeJdTuner tuner skill at /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/tuner/scrape-jd-url-tuner/SCRAPE_JD_URL_TUNER_SKILL.md.
 
-Process every dataset file in /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/tuner/scrape-jd-url-tuner/data-set/. Prefer `.json` files; `.txt` files are supported for backward compatibility.
+Process every dataset file in /Volumes/Git/openclaw/jd/jd-pipeline-kotlin/tuner/scrape-jd-url-tuner/data-set/. Prefer `.json` files; `.txt` files are supported for backward compatibility.
 
 For each file, run:
    ./gradlew run --args='--scrapetuner <absolute-file-path> --max-iterations 5'

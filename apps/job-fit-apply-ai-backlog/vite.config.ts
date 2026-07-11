@@ -15,7 +15,6 @@ export default defineConfig(({ mode }) => ({
   preview: {
     host: process.env.VITE_DEV_HOST ?? "localhost",
     port: 8080,
-    allowedHosts: true,
   },
   plugins: [react()],
   resolve: {

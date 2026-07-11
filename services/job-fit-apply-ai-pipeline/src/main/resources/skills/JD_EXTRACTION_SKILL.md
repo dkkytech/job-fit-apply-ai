@@ -19,7 +19,7 @@ Field definitions:
 - **required_skills**: skills explicitly labelled as required, must-have, or listed under Requirements / Qualifications
 - **preferred_skills**: skills labelled as preferred, nice-to-have, or listed as a plus
 - **domain_keywords**: industry-specific terms, acronyms, platform/tool names, and methodologies that appear in the JD (e.g. "Kubernetes", "XCUITest", "DAST", "BVT")
-- **ats_exact_phrases**: 5-10 multi-word phrases (2-5 words each) that should appear verbatim in the resume for ATS matching (e.g. "test automation framework", "CI/CD pipeline ownership"). Prioritise phrases from the Requirements/Responsibilities sections over boilerplate.
+- **ats_exact_phrases**: 2-5 word multi-word phrases that should appear verbatim in the resume for ATS matching (e.g. "test automation framework", "CI/CD pipeline ownership")
 - **company_value_signals**: phrases that reveal company culture or values ("move fast", "data-driven culture", "customer obsessed", "high ownership")
 
 Rules:

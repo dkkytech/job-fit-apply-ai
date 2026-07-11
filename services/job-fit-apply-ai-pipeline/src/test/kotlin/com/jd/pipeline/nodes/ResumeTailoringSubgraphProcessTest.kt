@@ -228,26 +228,21 @@ class ResumeTailoringSubgraphProcessTest {
         }
 
         @Test
-        @DisplayName("jd_extraction error is non-fatal: later nodes still run and it renders")
-        fun jdExtractionErrorIsNonFatal(@TempDir tempDir: Path) {
+        @DisplayName("jdExtraction error causes early return without calling later nodes")
+        fun jdExtractionErrorEarlyReturn(@TempDir tempDir: Path) {
             val jdExt = mock<JdExtractionNode>().apply {
                 whenever(process(any())).doAnswer { inv ->
                     (inv.arguments[0] as TailorState).copy(error = "jd_extraction: LLM failed")
                 }
             }
-            val gapAn  = mock<GapAnalysisNode>().apply { whenever(process(any())).doAnswer { it.arguments[0] as TailorState } }
-            val sumRew = mock<SummaryRewriteNode>().apply { whenever(process(any())).doAnswer { it.arguments[0] as TailorState } }
-            val bulRew = mock<BulletRewriteNode>().apply { whenever(process(any())).doAnswer { it.arguments[0] as TailorState } }
-            val sklRst = mock<SkillsRestructureNode>().apply { whenever(process(any())).doAnswer { it.arguments[0] as TailorState } }
-            val atsSc  = mock<AtsScoringNode>()
-            val htmlNd = mock<GenerateResumeHtmlNode>().apply { whenever(renderFromProfile(any())).doReturn("<html/>") }
+            val gapAn = mock<GapAnalysisNode>()
+            val htmlNd = mock<GenerateResumeHtmlNode>()
 
-            val subgraph = ResumeTailoringSubgraph(jdExt, gapAn, sumRew, bulRew, sklRst, atsSc, htmlNd)
+            val subgraph = ResumeTailoringSubgraph(jdExtraction = jdExt, gapAnalysis = gapAn, resumeHtmlNode = htmlNd)
             val result = subgraph.process(tailorInput(tempDir = tempDir))
 
-            verify(gapAn).process(any())              // later nodes still run despite the jd_extraction error
-            verify(htmlNd).renderFromProfile(any())   // and it still renders
-            assertTrue(result.error.isBlank(), "jd_extraction failure must be non-fatal: ${result.error}")
+            assertTrue(result.error.isNotBlank())
+            verify(gapAn, never()).process(any())
         }
 
         @Test
@@ -283,109 +278,6 @@ class ResumeTailoringSubgraphProcessTest {
             // Pipeline continues and renders HTML
             verify(htmlNd).renderFromProfile(any())
             assertTrue(result.error.isBlank(), "Non-fatal skills error should not propagate: ${result.error}")
-        }
-    }
-
-    // ── Robustness: a content-node failure must NOT abandon the report ────────
-
-    @Nested
-    @DisplayName("content-node failures are non-fatal (report still produced)")
-    inner class RobustnessNonFatal {
-
-        private val pass: (org.mockito.invocation.InvocationOnMock) -> TailorState = { it.arguments[0] as TailorState }
-
-        @Test
-        @DisplayName("bullet_rewrite error → still renders HTML + returns outputPath, no error")
-        fun bulletRewriteErrorIsNonFatal(@TempDir tempDir: Path) {
-            val jdExt  = mock<JdExtractionNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val gapAn  = mock<GapAnalysisNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val sumRew = mock<SummaryRewriteNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val bulRew = mock<BulletRewriteNode>().apply {
-                whenever(process(any())).doAnswer { inv -> (inv.arguments[0] as TailorState).copy(error = "bullet_rewrite: LLM 507") }
-            }
-            val sklRst = mock<SkillsRestructureNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val atsSc  = mock<AtsScoringNode>()
-            val htmlNd = mock<GenerateResumeHtmlNode>().apply { whenever(renderFromProfile(any())).doReturn("<html/>") }
-
-            val subgraph = ResumeTailoringSubgraph(jdExt, gapAn, sumRew, bulRew, sklRst, atsSc, htmlNd)
-            val result = subgraph.process(tailorInput(tempDir = tempDir))
-
-            assertTrue(result.error.isBlank(), "bullet_rewrite failure must not abort the subgraph: ${result.error}")
-            assertEquals(tempDir.toString(), result.outputPath)
-            verify(htmlNd).renderFromProfile(any())   // render happened despite the failure
-            assertTrue(
-                java.nio.file.Files.exists(tempDir.resolve("tailored_resume.html")),
-                "resume HTML should still be written so artifact_url is populated",
-            )
-            assertEquals(listOf("bullet_rewrite"), result.tailoringDegradedNodes, "the degraded node must be recorded")
-        }
-
-        @Test
-        @DisplayName("a node that THROWS is non-fatal — subgraph still renders + records it")
-        fun throwingNodeIsNonFatal(@TempDir tempDir: Path) {
-            val jdExt  = mock<JdExtractionNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val gapAn  = mock<GapAnalysisNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val sumRew = mock<SummaryRewriteNode>().apply { whenever(process(any())).thenThrow(RuntimeException("boom")) }
-            val bulRew = mock<BulletRewriteNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val sklRst = mock<SkillsRestructureNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val atsSc  = mock<AtsScoringNode>()
-            val htmlNd = mock<GenerateResumeHtmlNode>().apply { whenever(renderFromProfile(any())).doReturn("<html/>") }
-
-            val subgraph = ResumeTailoringSubgraph(jdExt, gapAn, sumRew, bulRew, sklRst, atsSc, htmlNd)
-            val result = subgraph.process(tailorInput(tempDir = tempDir))
-
-            assertTrue(result.error.isBlank(), "a thrown node error must not abort the subgraph: ${result.error}")
-            verify(htmlNd).renderFromProfile(any())
-            assertEquals(listOf("summary_rewrite"), result.tailoringDegradedNodes)
-        }
-
-        @Test
-        @DisplayName("a clean run records NO degraded nodes")
-        fun cleanRunHasNoDegraded(@TempDir tempDir: Path) {
-            val jdExt  = mock<JdExtractionNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val gapAn  = mock<GapAnalysisNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val sumRew = mock<SummaryRewriteNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val bulRew = mock<BulletRewriteNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val sklRst = mock<SkillsRestructureNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val atsSc  = mock<AtsScoringNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val htmlNd = mock<GenerateResumeHtmlNode>().apply { whenever(renderFromProfile(any())).doReturn("<html/>") }
-
-            val subgraph = ResumeTailoringSubgraph(jdExt, gapAn, sumRew, bulRew, sklRst, atsSc, htmlNd)
-            val result = subgraph.process(tailorInput(tempDir = tempDir))
-
-            assertTrue(result.tailoringDegradedNodes.isEmpty(), "clean run should record no degraded nodes: ${result.tailoringDegradedNodes}")
-        }
-
-        @Test
-        @DisplayName("multiple node failures are all recorded")
-        fun multipleFailuresRecorded(@TempDir tempDir: Path) {
-            val fail: (org.mockito.invocation.InvocationOnMock) -> TailorState = { (it.arguments[0] as TailorState).copy(error = "LLM failed") }
-            val jdExt  = mock<JdExtractionNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val gapAn  = mock<GapAnalysisNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val sumRew = mock<SummaryRewriteNode>().apply { whenever(process(any())).doAnswer(fail) }
-            val bulRew = mock<BulletRewriteNode>().apply { whenever(process(any())).doAnswer(fail) }
-            val sklRst = mock<SkillsRestructureNode>().apply { whenever(process(any())).doAnswer(pass) }
-            val atsSc  = mock<AtsScoringNode>()
-            val htmlNd = mock<GenerateResumeHtmlNode>().apply { whenever(renderFromProfile(any())).doReturn("<html/>") }
-
-            val subgraph = ResumeTailoringSubgraph(jdExt, gapAn, sumRew, bulRew, sklRst, atsSc, htmlNd)
-            val result = subgraph.process(tailorInput(tempDir = tempDir))
-
-            assertTrue(result.tailoringDegradedNodes.containsAll(listOf("summary_rewrite", "bullet_rewrite")),
-                "both failed nodes should be recorded: ${result.tailoringDegradedNodes}")
-        }
-
-        @Test
-        @DisplayName("sparse JD marks the resume as untailored (degraded)")
-        fun sparseJdMarksUntailored(@TempDir tempDir: Path) {
-            val htmlNd = mock<GenerateResumeHtmlNode>().apply { whenever(renderFromProfile(any())).doReturn("<html/>") }
-            val subgraph = ResumeTailoringSubgraph(resumeHtmlNode = htmlNd)
-            val input = tailorInput(jdText = "short jd text").copy(outputPath = tempDir.toString())
-
-            val result = subgraph.process(input)
-
-            assertEquals(1, result.tailoringDegradedNodes.size)
-            assertTrue(result.tailoringDegradedNodes[0].contains("untailored"), "sparse JD should be flagged untailored")
         }
     }
 }

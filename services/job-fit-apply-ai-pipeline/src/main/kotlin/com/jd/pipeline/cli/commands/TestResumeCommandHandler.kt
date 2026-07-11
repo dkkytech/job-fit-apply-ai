@@ -1,6 +1,5 @@
 package com.jd.pipeline.cli.commands
 
-import com.jd.pipeline.config.Config
 import com.jd.pipeline.nodes.RenderResumePdfNode
 import com.jd.pipeline.nodes.tailor.ResumeTailoringSubgraph
 import com.jd.pipeline.state.JDState
@@ -10,20 +9,8 @@ object TestResumeCommandHandler {
     fun run() {
         println("[INFO] Testing resume tailoring subgraph + PDF render...")
 
-        // The tailoring subgraph requires a candidate profile. Load the same
-        // config/candidate_profile.json the worker uses so --test-resume exercises
-        // the real summary/bullet/skills rewrite nodes (not just a bare mock).
-        val candidateProfile = JDState.loadCandidateProfile()
-        if (candidateProfile == null) {
-            System.err.println(
-                "[ERROR] No candidate profile at ${Config.CANDIDATE_PROFILE_PATH} — run --init-profile first"
-            )
-            return
-        }
-
         val mockState = JDState(
             isJobPosting = true,
-            candidateProfile = candidateProfile,
             company = "Acme Corp",
             roleTitle = "Staff Software Engineer in Test",
             location = "Remote (US)",

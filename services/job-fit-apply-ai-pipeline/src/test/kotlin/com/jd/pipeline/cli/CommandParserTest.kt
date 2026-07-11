@@ -1,16 +1,15 @@
 package com.jd.pipeline.cli
 
+import com.jd.pipeline.config.Config
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
  * Tests for [CommandParser] — pure logic, no I/O beyond temp files.
- *
- * Phase 1: Gmail commands (--reauth, --check-token, --test-gmail, --email, batch default) were
- * removed with the Gmail migration to the Poller. `--worker` is a deprecated alias for `--processor`.
  */
 @DisplayName("CommandParserTest")
 class CommandParserTest {
@@ -25,6 +24,14 @@ class CommandParserTest {
     fun testCoverLetterFlag() = assertEquals(Command.TestCoverLetter, parse("--test-coverletter"))
     @Test
     fun testSupabaseFlag() = assertEquals(Command.TestSupabase, parse("--test-supabase"))
+    @Test
+    fun testGmailFlag() = assertEquals(Command.TestGmail, parse("--test-gmail"))
+    @Test
+    fun reauthFlag() = assertEquals(Command.Reauth, parse("--reauth"))
+    @Test
+    fun checkTokenFlag() = assertEquals(Command.CheckToken, parse("--check-token"))
+    @Test
+    fun jsearchFlag() = assertEquals(Command.JSearch, parse("--jsearch"))
     @Test
     fun signedInFlag() = assertEquals(Command.SignedIn, parse("--signed-in"))
 
@@ -42,28 +49,80 @@ class CommandParserTest {
         assertEquals("path/to/file.pdf", cmd.path)
     }
 
-    // ── processor (formerly worker) ────────────────────────────────────────────
+    // ── batch / single email ─────────────────────────────────────────────────
 
     @Test
-    fun processorFlag() = assertEquals(Command.Processor, parse("--processor"))
+    fun noArgsIsBatch() {
+        val cmd = parse()
+        assertTrue(cmd is Command.Batch)
+        assertEquals(Config.GMAIL_MAX_EMAILS, cmd.maxEmails)
+        assertFalse(cmd.debug)
+    }
 
     @Test
-    fun workerFlagIsDeprecatedAliasForProcessor() = assertEquals(Command.Processor, parse("--worker"))
+    fun emailFlag() {
+        val cmd = parse("--email", "user@test.com")
+        assertTrue(cmd is Command.SingleEmail)
+        assertEquals("user@test.com", cmd.subject)
+        assertNull(cmd.expectedData)
+        assertEquals(5, cmd.maxIterations)
+        assertFalse(cmd.debug)
+    }
 
     @Test
-    fun noArgsIsUsage() = assertEquals(Command.Usage, parse())
+    fun emailWithExpectedData() {
+        val cmd = parse("--email", "user@test.com", "--expected-data", "foo")
+        assertTrue(cmd is Command.SingleEmail)
+        assertEquals("user@test.com", cmd.subject)
+        assertEquals("foo", cmd.expectedData)
+    }
 
     @Test
-    fun unknownFlagIsUsage() = assertEquals(Command.Usage, parse("--nonsense"))
+    fun emailWithDebug() {
+        val cmd = parse("--email", "user@test.com", "--debug")
+        assertTrue(cmd is Command.SingleEmail)
+        assertTrue(cmd.debug)
+    }
 
     @Test
-    fun notifyTimeoutFlag() {
-        val cmd = parse("--notify-timeout", "120")
-        assertTrue(cmd is Command.NotifyTimeout)
-        assertEquals(120, cmd.minutes)
+    fun maxEmailsFlag() {
+        val cmd = parse("--max-emails", "10")
+        assertTrue(cmd is Command.Batch)
+        assertEquals(10, cmd.maxEmails)
+    }
+
+    @Test
+    fun maxEmailFlagAlias() {
+        val cmd = parse("--max-email", "7")
+        assertTrue(cmd is Command.Batch)
+        assertEquals(7, cmd.maxEmails)
     }
 
     // ── tuner flags ───────────────────────────────────────────────────────────
+
+    @Test
+    fun scanTunerFlag() {
+        val cmd = parse("--scantuner")
+        assertTrue(cmd is Command.ScanTuner)
+        assertNull(cmd.file)
+        assertEquals(5, cmd.maxIterations)
+        assertFalse(cmd.debug)
+    }
+
+    @Test
+    fun scanTunerWithFile() {
+        val cmd = parse("--scantuner", "scan_data.json", "--max-iterations", "3")
+        assertTrue(cmd is Command.ScanTuner)
+        assertEquals("scan_data.json", cmd.file)
+        assertEquals(3, cmd.maxIterations)
+    }
+
+    @Test
+    fun scanTunerWithDebug() {
+        val cmd = parse("--scantuner", "--debug")
+        assertTrue(cmd is Command.ScanTuner)
+        assertTrue(cmd.debug)
+    }
 
     @Test
     fun scrapeJdTunerFlag() {
@@ -101,9 +160,23 @@ class CommandParserTest {
     }
 
     @Test
-    fun priorityOrder_notifyTimeoutWinsOverTest() {
-        // notify-timeout is checked first in the final when block.
-        assertEquals(Command.NotifyTimeout(30), parse("--test", "--notify-timeout", "30"))
+    fun priorityOrder_testSupabaseOverReauth() {
+        assertEquals(Command.TestSupabase, parse("--reauth", "--test-supabase"))
+    }
+
+    @Test
+    fun priorityOrder_reauthOverCheckToken() {
+        assertEquals(Command.Reauth, parse("--check-token", "--reauth"))
+    }
+
+    @Test
+    fun priorityOrder_checkTokenOverScanTuner() {
+        assertEquals(Command.CheckToken, parse("--scantuner", "--check-token"))
+    }
+
+    @Test
+    fun priorityOrder_scanTunerOverScrapeJdTuner() {
+        assertEquals(Command.ScanTuner(null, 5, false), parse("--scrapetuner", "--scantuner"))
     }
 
     @Test
@@ -120,8 +193,21 @@ class CommandParserTest {
     }
 
     @Test
-    fun priorityOrder_signedInOverProcessor() {
-        assertEquals(Command.SignedIn, parse("--processor", "--signed-in"))
+    fun priorityOrder_emailOverSignedIn() {
+        val cmd = parse("--signed-in", "--email", "a@b.com")
+        assertTrue(cmd is Command.SingleEmail)
+    }
+
+    @Test
+    fun priorityOrder_signedInOverJSearch() {
+        val cmd = parse("--jsearch", "--signed-in")
+        assertEquals(Command.SignedIn, cmd)
+    }
+
+    @Test
+    fun priorityOrder_jSearchOverBatch() {
+        val cmd = parse("--max-emails", "3", "--jsearch")
+        assertEquals(Command.JSearch, cmd)
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

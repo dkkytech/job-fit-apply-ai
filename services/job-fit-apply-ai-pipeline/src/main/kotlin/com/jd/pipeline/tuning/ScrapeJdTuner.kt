@@ -38,21 +38,16 @@ class ScrapeJdTuner {
         writeInputArtifacts(input, datasetFilePath, outputDir, maxIterations, tunerSkill)
 
         scrapeJdNode.verbose = false
-        val finalResult = try {
-            val scraped = scrapeJdNode.process(input)
-            val result = scraped.copy(scrapeJdTuningOutputDir = outputDir.toString())
+        val scraped = scrapeJdNode.process(input)
+        val result = scraped.copy(scrapeJdTuningOutputDir = outputDir.toString())
 
-            val comparisonReport = buildComparisonReport(input, result, maxIterations, tunerSkill)
-            val withReport = result.copy(scrapeJdComparisonReport = comparisonReport)
-            writeString(outputDir.resolve("scrape_comparison_report.md"), comparisonReport)
-            writeString(outputDir.resolve("scrape_result_dump.txt"), buildResultDump(withReport, maxIterations))
+        val comparisonReport = buildComparisonReport(input, result, maxIterations, tunerSkill)
+        val finalResult = result.copy(scrapeJdComparisonReport = comparisonReport)
+        writeString(outputDir.resolve("scrape_comparison_report.md"), comparisonReport)
+        writeString(outputDir.resolve("scrape_result_dump.txt"), buildResultDump(finalResult, maxIterations))
 
-            if (withReport.scrapedContent.isNotEmpty()) {
-                writeString(outputDir.resolve("scraped_content.txt"), withReport.scrapedContent)
-            }
-            withReport
-        } finally {
-            scrapeJdNode.close()
+        if (finalResult.scrapedContent.isNotEmpty()) {
+            writeString(outputDir.resolve("scraped_content.txt"), finalResult.scrapedContent)
         }
 
         return finalResult

@@ -23,9 +23,7 @@ LOCAL_HARDWARE:
   memory_bandwidth: ~400 GB/s
   cpu_cores: 16
   gpu_cores: 40
-  local_runtime: oMLX            # OpenAI-compatible MLX server (NOT Ollama)
-  local_model_format: MLX (mlx-community / LM Studio), 4-bit & 8-bit
-  local_model_dir: ~/.lmstudio/models/mlx-community
+  ollama_version: latest
 ```
 
 ---

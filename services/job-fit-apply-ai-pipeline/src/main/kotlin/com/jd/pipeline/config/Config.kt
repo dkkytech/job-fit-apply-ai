@@ -21,29 +21,13 @@ object Config {
     val LANGSMITH_API_KEY: String = get("LANGSMITH_API_KEY", "")
     val SUPABASE_PROJECT_URL: String = get("SUPABASE_PROJECT_URL", "")
     val SUPABASE_SERVICE_ROLE_KEY: String = get("SUPABASE_SERVICE_ROLE_KEY", get("SUPABASE_KEY", ""))
-
-    // LLM concurrency gate (per physical resource). Local backends (oMLX + Ollama-local)
-    // share ONE permit; cloud backends get a larger pool. See client/LlmGate.kt.
-    val LOCAL_LLM_MAX_CONCURRENCY: Int = get("LOCAL_LLM_MAX_CONCURRENCY", "1").toInt()
-    val CLOUD_LLM_MAX_CONCURRENCY: Int = get("CLOUD_LLM_MAX_CONCURRENCY", "4").toInt()
-
-    // Database backend selection (Supabase → self-hosted Postgres migration).
-    //   DB_BACKEND=supabase → SupabaseClient (REST/PostgREST, default)
-    //   DB_BACKEND=postgres → PostgresGateway (direct JDBC to the container)
-    val DB_BACKEND: String = get("DB_BACKEND", "supabase")
-    // libpq-style URL; containers use host "db", host apps use "localhost".
-    val DATABASE_URL: String = get("DATABASE_URL", "postgresql://jobfit:jobfit@localhost:5432/jobfit")
     val MINIMAX_API_KEY: String = get("MINIMAX_API_KEY", "")
     val GOOGLE_API_KEY: String = get("GOOGLE_API_KEY", "")
     val DEEPSEEK_API_KEY: String = get("DEEPSEEK_API_KEY", "")
-
-    // ── oMLX (local MLX inference, OpenAI-compatible) ──────────────────────────────
-    // Default backend for no-suffix model strings. Served by oMLX on this host.
-    val MLX_LOCAL_BASE_URL: String = get("MLX_LOCAL_BASE_URL", "http://127.0.0.1:11436/v1")
-    val MLX_API_KEY: String = get("MLX_API_KEY", "11436")
+    val JSEARCH_API_KEY: String = get("JSEARCH_API_KEY", "")
 
     // ── Ollama ───────────────────────────────────────────────────────────────────
-    // Local Ollama endpoint (":ollama-local" suffix escape hatch).
+    // Local Ollama endpoint (no-suffix model strings).
     val OLLAMA_LOCAL_BASE_URL: String = get("OLLAMA_LOCAL_BASE_URL", "http://localhost:11434")
     // Ollama Cloud endpoint (:ollama-cloud suffix model strings).
     val OLLAMA_CLOUD_BASE_URL: String = get("OLLAMA_CLOUD_BASE_URL", "https://ollama.com")
@@ -58,48 +42,43 @@ object Config {
 
     // ── Model configuration ───────────────────────────────────────────────────────
     // Scan / scrape: structured JSON extraction — small, fast, deterministic (temp=0)
-    // Best local (oMLX): Qwen3.5-9B-OptiQ-4bit   Cloud: deepseek-v4-flash:ollama-cloud
-    val SCAN_MODEL: String = get("SCAN_MODEL", "Qwen3.5-9B-OptiQ-4bit")
+    // Best local: qwen3.5:9b-q4_K_M   Cloud: deepseek-v4-flash:ollama-cloud
+    val SCAN_MODEL: String = get("SCAN_MODEL", "qwen3.5:9b-q4_K_M")
     val SCRAPE_MODEL: String = get("SCRAPE_MODEL", SCAN_MODEL)
 
     // Score: rubric-based fit scoring — needs chain-of-thought reasoning (thinking enabled)
-    // Best local (oMLX): Qwen3.5-9B-OptiQ-4bit   Cloud: deepseek-v4-pro:ollama-cloud
-    val SCORE_MODEL: String = get("SCORE_MODEL", "Qwen3.5-9B-OptiQ-4bit")
+    // Best local: qwen3.5:9b-q4_K_M   Cloud: deepseek-v4-pro:ollama-cloud
+    val SCORE_MODEL: String = get("SCORE_MODEL", "qwen3.5:9b-q4_K_M")
 
-    // Cover letter: prose writing quality — a dedicated prose model pays off here
-    // Best local (oMLX): gemma-4-12B-it-qat-4bit   Cloud: glm-5.1:ollama-cloud
-    val COVER_LETTER_MODEL: String = get("COVER_LETTER_MODEL", "gemma-4-12B-it-qat-4bit")
+    // Cover letter: prose writing quality — larger model pays off here
+    // Best local: qwen3.5:9b-q4_K_M   Cloud: glm-5.1:ollama-cloud
+    val COVER_LETTER_MODEL: String = get("COVER_LETTER_MODEL", "qwen3.5:9b-q4_K_M")
 
-    // Draft reply: short recruiter email — any capable small model is fine
-    // Best local (oMLX): Qwen3.5-9B-OptiQ-4bit   Cloud: deepseek-v4-flash:ollama-cloud
-    val DRAFT_REPLY_MODEL: String = get("DRAFT_REPLY_MODEL", "Qwen3.5-9B-OptiQ-4bit")
+    // Draft reply: short recruiter email — any capable 7B is fine
+    // Best local: qwen3.5:9b-q4_K_M   Cloud: deepseek-v4-flash:ollama-cloud
+    val DRAFT_REPLY_MODEL: String = get("DRAFT_REPLY_MODEL", "qwen3.5:9b-q4_K_M")
 
     // Resume tailoring subgraph — reasoning (summary rewrite, bullet rewrite)
-    // Creative (temp=0.4): prose quality matters
-    // Best local (oMLX): Qwen3.5-9B-OptiQ-4bit   Cloud: glm-5.1:ollama-cloud
-    val RESUME_REASONING_MODEL: String = get("RESUME_REASONING_MODEL", "Qwen3.5-9B-OptiQ-4bit")
-    // When false (default), /no_think is prepended to qwen3 reasoning calls to avoid 300s+ thinking timeouts.
-    // Set to true only if the local model is fast enough to finish thinking within the 300s timeout.
-    val RESUME_REASONING_THINKING: Boolean = get("RESUME_REASONING_THINKING", "false").toBoolean()
+    // Creative (temp=0.4, thinking enabled): prose quality matters
+    // Best local: qwen3.5:9b-q4_K_M   Cloud: glm-5.1:ollama-cloud
+    val RESUME_REASONING_MODEL: String = get("RESUME_REASONING_MODEL", "qwen3.5:9b-q4_K_M")
 
     // Skills restructure: judgment-heavy (category ordering, JD phrasing match) but factually grounded.
     // temp=0.2 — enough flexibility to follow multi-constraint instructions without hallucinating skills.
-    // Best local (oMLX): Qwen3.5-9B-OptiQ-4bit   Cloud: deepseek-v4-pro:ollama-cloud
+    // Best local: qwen3.5:9b-q4_K_M   Cloud: deepseek-v4-pro:ollama-cloud
     val SKILLS_MODEL: String = get("SKILLS_MODEL", RESUME_REASONING_MODEL)
 
     // ── Scoring thresholds ───────────────────────────────────────────────────────
     val FIT_THRESHOLD: Float = get("FIT_THRESHOLD", "50").toFloat()
-    // ATS refinement pass: when the tailored resume's ATS overall score lands below the
-    // threshold, the subgraph re-runs summary+bullet rewrites once with the ATS feedback in
-    // the prompts and keeps the better-scoring pass. Adds up to one extra summary/bullet/score
-    // round per job (~several minutes on local models) — disable for latency-sensitive runs.
-    val ATS_REFINE_ENABLED: Boolean = get("ATS_REFINE_ENABLED", "true").toBoolean()
-    val ATS_REFINE_THRESHOLD: Int = get("ATS_REFINE_THRESHOLD", "80").toInt()
     // Duplicate detection: jobs seen within this window are considered duplicates.
     // Re-opened positions after the window expires are treated as new.
     val DUPLICATE_WINDOW_DAYS: Int = get("DUPLICATE_WINDOW_DAYS", "30").toInt()
 
-    // Gmail intake/auth moved to the Poller service (Phase 1) — no Gmail config here.
+    // ── Gmail ────────────────────────────────────────────────────────────────────
+    val GMAIL_CREDENTIALS_FILE: String = get("GMAIL_CREDENTIALS_FILE", "gmail_credentials.json")
+    val GMAIL_TOKEN_FILE: String = get("GMAIL_TOKEN_FILE", "tokens/gmail_token.json")
+    val GMAIL_MAX_EMAILS: Int = get("GMAIL_MAX_EMAILS", "3").toInt()
+    val GMAIL_SEARCH_QUERY: String = get("GMAIL_SEARCH_QUERY", "newer_than:7d in:inbox -label:JD_Not_Found -label:Recruiter_Response_Required -label:JD_Processing")
 
     // ── Skills paths ─────────────────────────────────────────────────────────
     val SKILLS_DIR: Path = PROJECT_DIR.resolve("src/main/resources/skills")
@@ -147,39 +126,14 @@ object Config {
         Paths.get(System.getProperty("user.home"), "Library", "Application Support", "Google", "Chrome").toString()
     )
     val CHROME_PROFILE_DIRECTORY: String = get("CHROME_PROFILE_DIRECTORY", "Default")
-    // CDP (Chrome DevTools Protocol) connection to a long-lived, user-launched Chrome.
-    // When set (e.g. http://localhost:9222), the scraper connects to that already-running
-    // Chrome and reuses its logged-in profile + warm session instead of launching a fresh,
-    // profile-copied browser per job. Empty = disabled (legacy per-job launch path).
-    // Launch the target Chrome with scripts/launch-chrome-cdp.sh.
-    val CHROME_CDP_ENDPOINT: String = get("CHROME_CDP_ENDPOINT", "")
-    // Remote-debugging port the launch script opens; also used to surface a helpful endpoint hint.
-    val CHROME_DEBUG_PORT: String = get("CHROME_DEBUG_PORT", "9222")
-    // Dedicated user-data-dir for the CDP debug Chrome (used by scripts/launch-chrome-cdp.sh).
-    // Must NOT be the Default profile — current Chrome refuses remote debugging on the default dir
-    // ("DevTools remote debugging requires a non-default data directory"). This profile can run
-    // alongside your everyday Chrome; sign into the job boards in it once (the login persists here).
-    val CHROME_CDP_USER_DATA_DIR: String = get(
-        "CHROME_CDP_USER_DATA_DIR",
-        Paths.get(System.getProperty("user.home"), "Library", "Application Support", "Google", "Chrome-CDP").toString()
-    )
-    // Comma-separated domains that skip the HTTP fetch and scrape via the CDP browser directly
-    // (proactive — for sites that soft-block or challenge plain HTTP, e.g. Glassdoor's Cloudflare).
-    // Suffix match (a domain also matches its subdomains). Requires the debug Chrome to be up.
-    val CDP_FORCE_DOMAINS: String = get("CDP_FORCE_DOMAINS", "")
     val PLAYWRIGHT_HEADLESS: Boolean = get("PLAYWRIGHT_HEADLESS", "false").toBoolean()
     // When true, sites blocked by HTTP (403, CAPTCHA, Cloudflare) are retried with a clean Playwright session.
     val PLAYWRIGHT_FALLBACK_ON_CAPTCHA: Boolean = get("PLAYWRIGHT_FALLBACK_ON_CAPTCHA", "true").toBoolean()
-    // When true, pages that return fewer than PLAYWRIGHT_FALLBACK_MIN_CONTENT_LENGTH chars via HTTP
-    // (JS-rendered SPAs like Jobright/Next.js) are retried with a clean Playwright session.
-    val PLAYWRIGHT_FALLBACK_ON_THIN_CONTENT: Boolean = get("PLAYWRIGHT_FALLBACK_ON_THIN_CONTENT", "true").toBoolean()
-    val PLAYWRIGHT_FALLBACK_MIN_CONTENT_LENGTH: Int = get("PLAYWRIGHT_FALLBACK_MIN_CONTENT_LENGTH", "500").toInt()
 
     // ── Resume generation from DOCX/PDF ─────────────────────────────────────────
-    // Needs strong instruction-following to replicate HTML structure from a template,
-    // plus a longer context window for the full resume HTML — a capable prose model fits well.
-    // Best local (oMLX): gemma-4-12B-it-qat-4bit   Cloud: deepseek-v4-pro:ollama-cloud
-    val RESUME_GEN_MODEL: String = get("RESUME_GEN_MODEL", "gemma-4-12B-it-qat-4bit")
+    // Needs strong instruction-following to replicate HTML structure from a template.
+    // Best local: qwen3.5:9b-q4_K_M   Cloud: deepseek-v4-pro:ollama-cloud
+    val RESUME_GEN_MODEL: String = get("RESUME_GEN_MODEL", "qwen3.5:9b-q4_K_M")
     val RESUME_GEN_SKILL: Path = SKILLS_DIR.resolve("RESUME_GEN_SKILL.md")
 
     // ── Candidate profile generation (--init-profile) ───────────────────────────
@@ -192,10 +146,6 @@ object Config {
     val TAILOR_SKILL_TEMPLATE_PATH: Path = SKILLS_DIR.resolve("TAILOR_SKILL.template.md")
     /** Rendered TAILOR_SKILL.md, gitignored — produced by `--init-profile`. */
     val TAILOR_SKILL_PATH: Path = SKILLS_DIR.resolve("TAILOR_SKILL.md")
-
-    // ── Digest LLM fallback ───────────────────────────────────────────────────────
-    val DIGEST_LLM_FALLBACK_ENABLED: Boolean = get("DIGEST_LLM_FALLBACK_ENABLED", "true").toBoolean()
-    val DIGEST_SKILL: Path = SKILLS_DIR.resolve("DIGEST_SKILL.md")
 
     // ── Notifications (Discord + Telegram) ───────────────────────────────────────
     val DISCORD_BOT_TOKEN: String  = get("DISCORD_BOT_TOKEN", "")

@@ -1,9 +1,13 @@
 /**
  * popup.js
  *
- * On load: read this tab's job state from the background worker and render it, then poll
- * for updates (storage change events don't reach the popup reliably). All mutation goes
- * through the background service worker.
+ * Runs in the popup window. On load:
+ *  1. Gets the active tab ID
+ *  2. Reads job state from background via message
+ *  3. Renders the current state
+ *  4. Starts polling for updates (storage events don't cross to popup, so we poll)
+ *
+ * All mutation goes through the background service worker.
  */
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
@@ -23,18 +27,16 @@ const errorMsg     = $('error-msg');
 const btnRetry     = $('btn-retry');
 
 const doneBlock    = $('done-block');
-const fitBadge     = $('fit-badge');
 const artifactLinks= $('artifact-links');
 const btnReset     = $('btn-reset');
 
 const steps = {
-  capturing:  $('step-capture'),
+  extracting: $('step-extract'),
   submitting: $('step-submit'),
   processing: $('step-process'),
   complete:   $('step-complete'),
 };
 
-const ORDER = ['capturing', 'submitting', 'processing', 'complete'];
 const connectors = document.querySelectorAll('.pipe-connector');
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -49,6 +51,7 @@ let pollTimer   = null;
   if (!tab) return;
   activeTabId = tab.id;
 
+  // Show the site in the badge
   try {
     const host = new URL(tab.url).hostname.replace(/^www\./, '');
     siteBadge.textContent = host.length > 28 ? host.slice(0, 26) + '…' : host;
@@ -61,7 +64,6 @@ let pollTimer   = null;
 // ── Polling ───────────────────────────────────────────────────────────────────
 
 function startPolling() {
-  clearInterval(pollTimer);
   pollTimer = setInterval(refreshState, 1500);
 }
 
@@ -76,19 +78,23 @@ async function refreshState() {
 function render(state) {
   const status = state?.status || 'idle';
 
+  // Job metadata
   if (state?.jdTitle || state?.company) {
     jobCard.style.display = '';
-    jobTitle.textContent   = state.jdTitle || 'Untitled Role';
-    jobCompany.textContent = state.company || '—';
+    jobTitle.textContent  = state.jdTitle  || 'Untitled Role';
+    jobCompany.textContent= state.company  || '—';
   } else {
     jobCard.style.display = 'none';
   }
 
+  // Progress message
   progressMsg.textContent = state?.progressMessage || '';
 
+  // Pipeline steps
   updatePipeline(status);
 
-  ctaIdle.hidden    = !['idle', 'error'].includes(status);
+  // Block visibility
+  ctaIdle.hidden   = !['idle', 'error'].includes(status);
   errorBlock.hidden = status !== 'error';
   doneBlock.hidden  = status !== 'complete';
 
@@ -97,17 +103,17 @@ function render(state) {
   }
 
   if (status === 'complete' && state?.artifacts) {
-    renderArtifacts(state.artifacts);
-    renderFit(state.fitScore);
-    clearInterval(pollTimer); // terminal — stop polling
+    renderArtifacts(state.artifacts, state.jobId);
+    clearInterval(pollTimer); // done, stop polling
   }
 
-  const busy = ['capturing', 'submitting', 'processing'].includes(status);
-  btnGenerate.disabled = busy;
+  // Button state
+  btnGenerate.disabled = ['extracting','submitting','processing'].includes(status);
 }
 
 function updatePipeline(status) {
-  const idx = ORDER.indexOf(status);
+  const ORDER = ['extracting', 'submitting', 'processing', 'complete'];
+  const idx   = ORDER.indexOf(status);
 
   ORDER.forEach((step, i) => {
     const el = steps[step];
@@ -115,6 +121,7 @@ function updatePipeline(status) {
     el.classList.remove('active', 'done', 'error');
 
     if (status === 'error' && i <= Math.max(idx, 0)) {
+      // Mark the last reached step as error
       if (i === Math.max(idx, 0)) el.classList.add('error');
       else el.classList.add('done');
     } else if (i < idx) {
@@ -124,6 +131,7 @@ function updatePipeline(status) {
     }
   });
 
+  // Connectors (there are 3, between steps 0-1, 1-2, 2-3)
   connectors.forEach((c, i) => {
     c.classList.remove('done', 'active');
     if (i < idx - 1) c.classList.add('done');
@@ -131,13 +139,7 @@ function updatePipeline(status) {
   });
 }
 
-function renderFit(fitScore) {
-  if (fitScore == null) { fitBadge.hidden = true; return; }
-  fitBadge.hidden = false;
-  fitBadge.textContent = `fit ${fitScore}`;
-}
-
-function renderArtifacts(artifacts) {
+function renderArtifacts(artifacts, jobId) {
   artifactLinks.innerHTML = '';
 
   const items = [
@@ -163,28 +165,27 @@ function renderArtifacts(artifacts) {
   }
 }
 
-// ── Button handlers ─────────────────────────────────────────────────────────────
+// ── Button handlers ───────────────────────────────────────────────────────────
 
 btnGenerate.addEventListener('click', async () => {
   btnGenerate.disabled = true;
   await chrome.runtime.sendMessage({ type: 'POPUP_TRIGGER' });
-  startPolling();
   await refreshState();
 });
 
 btnRetry.addEventListener('click', async () => {
   await clearJobState(activeTabId);
-  startPolling();
   await refreshState();
 });
 
 btnReset.addEventListener('click', async () => {
   await clearJobState(activeTabId);
+  clearInterval(pollTimer);
   startPolling();
   await refreshState();
 });
 
-// ── Messaging helpers ────────────────────────────────────────────────────────────
+// ── Messaging helpers ─────────────────────────────────────────────────────────
 
 function getJobState(tabId) {
   return new Promise(resolve =>

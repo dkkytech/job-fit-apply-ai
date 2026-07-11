@@ -46,7 +46,7 @@ object TestSupabaseCommandHandler {
         val result = supabaseNode.process(mockState)
 
         if (result.isSupabaseTracked) {
-            println("[OK] Tracked successfully (id=${result.trackId ?: "unknown"})")
+            println("[OK] Pushed to Supabase: ${result.trackUrl}")
         } else {
             println("[ERROR] Push failed: ${result.error}")
         }

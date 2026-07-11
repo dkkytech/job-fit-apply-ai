@@ -1,12 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { ChevronRight } from "lucide-react";
-import {
-  fetchTracks as apiFetchTracks,
-  updateTrackStatus as apiUpdateTrackStatus,
-  STATUS_OPTIONS,
-  type Status,
-  type Track,
-} from "@/lib/api";
+import { supabase } from "@/integrations/supabase/client";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -17,6 +11,27 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "@/hooks/use-toast";
 import { ExternalLink, MapPin, Briefcase, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
+
+const STATUS_OPTIONS = [
+  "backlog", "duplicate", "applied", "interested", "skipped", "interviewing", "rejected", "offer",
+] as const;
+
+type Status = (typeof STATUS_OPTIONS)[number];
+
+interface Track {
+  id: number;
+  company: string;
+  role_title: string;
+  location: string | null;
+  remote_policy: string | null;
+  fit_score: number | null;
+  job_url: string | null;
+  artifact_url: string | null;
+  tech_stack: string[] | null;
+  status: Status;
+  created_at: string;
+  duplicate: boolean;
+}
 
 const statusColors: Record<Status, string> = {
   backlog: "bg-[hsl(var(--status-backlog))] text-white",
@@ -80,14 +95,17 @@ const Index = () => {
   };
 
   const fetchTracks = useCallback(async () => {
-    try {
-      const data = await apiFetchTracks();
-      setAllTracks((data ?? []).filter((t) => !t.duplicate && (t.status === "backlog" || t.status === "interested")));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load tracks");
-    } finally {
-      setLoading(false);
+    const { data, error } = await supabase
+      .from("tracks")
+      .select("id, company, role_title, location, remote_policy, fit_score, job_url, artifact_url, tech_stack, status, created_at, duplicate")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      setError(error.message);
+      return;
     }
+    setAllTracks(((data as Track[]) ?? []).filter((t) => !t.duplicate && (t.status === "backlog" || t.status === "interested")));
+    setLoading(false);
   }, []);
 
   useEffect(() => { fetchTracks(); }, [fetchTracks]);
@@ -103,13 +121,13 @@ const Index = () => {
       setCollapsedIds((s) => { const next = new Set(s); next.delete(id); return next; });
     }
 
-    try {
-      await apiUpdateTrackStatus(id, newStatus);
-      toast({ title: "Status updated", description: `Changed to ${newStatus}` });
-    } catch (e) {
+    const { error } = await supabase.from("tracks").update({ status: newStatus }).eq("id", id);
+    if (error) {
       setAllTracks(prev);
       setCollapsedIds((s) => { const next = new Set(s); next.delete(id); return next; });
-      toast({ title: "Update failed", description: e instanceof Error ? e.message : "Update failed", variant: "destructive" });
+      toast({ title: "Update failed", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Status updated", description: `Changed to ${newStatus}` });
     }
   };
 

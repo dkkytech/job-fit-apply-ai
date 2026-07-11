@@ -31,12 +31,4 @@ sealed interface IntakeContext {
     ) : IntakeContext {
         override val provenance: String = "test"
     }
-
-    /** A page captured by the browser extension in the user's authenticated session. */
-    data class WebCapture(
-        val url: String,
-        val title: String,
-    ) : IntakeContext {
-        override val provenance: String = "extension"
-    }
 }

@@ -105,30 +105,6 @@ class ResultPostTest {
     }
 
     @Test
-    fun `POST result tolerates unknown fields the worker adds (e g artifact_url)`() = testApplication {
-        // Regression: the worker's ProcessingResult gained an artifact_url field; with
-        // ignoreUnknownKeys=false the bridge 400'd every postResult, stranding jobs in
-        // "claimed" forever. The bridge must accept unknown result fields and still finish.
-        application { configureApplication() }
-        val submitResp = client.post("/api/jobs") {
-            contentType(ContentType.Application.Json)
-            setBody("""{"jd_text":"${minimalJdText()}"}""")
-        }
-        val jobId = Json.parseToJsonElement(submitResp.bodyAsText()).jsonObject["job_id"]!!.jsonPrimitive.content
-        client.get("/api/queue/claim")
-
-        val resultResp = client.post("/api/jobs/$jobId/result") {
-            contentType(ContentType.Application.Json)
-            setBody("""{"pipeline_action":"TAILOR","fit_score":85,"strengths":[],"is_duplicate":false,"has_cover_letter":false,"artifact_url":"http://x/report.md","some_future_field":42}""")
-        }
-        assertEquals(HttpStatusCode.OK, resultResp.status)
-
-        val status = Json.parseToJsonElement(client.get("/api/jobs/$jobId").bodyAsText()).jsonObject
-        assertEquals("done", status["status"]!!.jsonPrimitive.content)
-        assertEquals(85, status["fit_score"]!!.jsonPrimitive.int)
-    }
-
-    @Test
     fun `POST result with error transitions job to error`() = testApplication {
         application { configureApplication() }
         val submitResp = client.post("/api/jobs") {

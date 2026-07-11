@@ -17,7 +17,6 @@ class BoardRegistryTest {
 
         @Test fun linkedin()          { assertEquals("linkedin",             BoardRegistry.groupFor("linkedin.com")?.key) }
         @Test fun glassdoor()         { assertEquals("glassdoor",            BoardRegistry.groupFor("glassdoor.com")?.key) }
-        @Test fun builtin()           { assertEquals("builtin",              BoardRegistry.groupFor("builtin.com")?.key) }
         @Test fun jobleads()          { assertEquals("jobleads",             BoardRegistry.groupFor("jobleads.com")?.key) }
         @Test fun lensa()             { assertEquals("lensa",                BoardRegistry.groupFor("lensa.com")?.key) }
         @Test fun jobright()          { assertEquals("jobright",             BoardRegistry.groupFor("jobright.ai")?.key) }

@@ -23,7 +23,6 @@ object Json {
         JsonSubTypes.Type(value = IntakeContext.Email::class, name = "email"),
         JsonSubTypes.Type(value = IntakeContext.Api::class, name = "api"),
         JsonSubTypes.Type(value = IntakeContext.Synthetic::class, name = "synthetic"),
-        JsonSubTypes.Type(value = IntakeContext.WebCapture::class, name = "web_capture"),
     )
     internal abstract class IntakeContextMixin
 }

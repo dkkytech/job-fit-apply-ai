@@ -122,46 +122,6 @@ class MetadataUtilsTest {
     }
 
     @Test
-    @DisplayName("report.md reports Resume Generation — fully generated vs short-circuited")
-    fun testResumeGenerationField(@TempDir tempDir: Path) {
-        Files.createDirectories(tempDir)
-        val base = TestJDStateFactory.createHighScoredState().copy(
-            outputPath = tempDir.toString(),
-            pipelineAction = com.jd.pipeline.state.PipelineAction.TAILOR,
-        )
-
-        // Fully generated (no degraded nodes)
-        MetadataUtils.writeMetadata(base.copy(tailoringDegradedNodes = emptyList()))
-        val full = Files.readString(tempDir.resolve("report.md"))
-        assertTrue(full.contains("| Resume Generation |"), "report should have a Resume Generation row")
-        assertTrue(full.contains("Fully generated"), "clean tailoring should read 'Fully generated'")
-
-        // Short-circuited (a node fell back to base content)
-        MetadataUtils.writeMetadata(base.copy(tailoringDegradedNodes = listOf("bullet_rewrite")))
-        val degraded = Files.readString(tempDir.resolve("report.md"))
-        assertTrue(degraded.contains("Short-circuited"), "degraded tailoring should read 'Short-circuited'")
-        assertTrue(degraded.contains("bullet_rewrite"), "report should name the node that fell back")
-    }
-
-    @Test
-    @DisplayName("Resume Generation is N/A for non-tailored jobs; metadata.json carries the fields")
-    fun testResumeGenerationNonTailoredAndJson(@TempDir tempDir: Path) {
-        Files.createDirectories(tempDir)
-        val state = TestJDStateFactory.createHighScoredState().copy(
-            outputPath = tempDir.toString(),
-            pipelineAction = com.jd.pipeline.state.PipelineAction.SKIP,
-        )
-        MetadataUtils.writeMetadata(state)
-
-        val md = Files.readString(tempDir.resolve("report.md"))
-        assertTrue(md.contains("N/A (not tailored)"), "SKIP jobs should show N/A for Resume Generation")
-
-        val json = Files.readString(tempDir.resolve("metadata.json"))
-        assertTrue(json.contains("resume_generation"), "metadata.json should carry resume_generation")
-        assertTrue(json.contains("resume_degraded_nodes"), "metadata.json should carry resume_degraded_nodes")
-    }
-
-    @Test
     @DisplayName("writeMetadata should handle duplicate jobs correctly")
     fun testWriteMetadataHandlesDuplicate(@TempDir tempDir: Path) {
         // Given

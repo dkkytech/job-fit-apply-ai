@@ -1,7 +1,7 @@
 /**
  * tests/background.test.js
  *
- * Unit tests for background.js — the MV3 service worker (capture → submit → poll flow).
+ * Unit tests for background.js — the MV3 service worker.
  * Each describe block reloads the module to get a fresh listener registration.
  */
 
@@ -22,37 +22,41 @@ function getInstallListener() {
   return calls[calls.length - 1]?.[0];
 }
 
+// Storage keys mirror the KEY() helper in background.js
 const stateKey = (tabId) => `job_${tabId}`;
-
-/** Make the on-demand page capture resolve with a payload (both executeScript calls). */
-function mockCapture({ url = 'https://linkedin.com/jobs/view/1', title = 'Staff SDET', text = 'x'.repeat(400) } = {}) {
-  chrome.scripting.executeScript.mockResolvedValue([{ result: { url, title, text } }]);
-}
 
 // ── Module loading ─────────────────────────────────────────────────────────────
 
 beforeEach(() => {
   jest.resetModules();
+  // Clear all mock call histories and the in-memory storage
   jest.clearAllMocks();
   global._storageMock._reset();
 });
 
 function loadBackground() {
+  // background.js uses ES module syntax but Jest runs CJS — jest-environment-jsdom
+  // doesn't transform it, so we use a dynamic require after jest.resetModules().
   return require('../background.js');
 }
 
 // ── onInstalled ────────────────────────────────────────────────────────────────
 
 describe('onInstalled handler', () => {
-  it('removes then recreates the jfa-capture context menu item', () => {
+  it('removes then recreates the context menu item', () => {
     loadBackground();
-    getInstallListener()();
 
-    expect(chrome.contextMenus.remove).toHaveBeenCalledWith('jfa-capture', expect.any(Function));
-    const removeCb = chrome.contextMenus.remove.mock.calls[0][1];
-    removeCb();
+    const handler = getInstallListener();
+    handler();
+
+    expect(chrome.contextMenus.remove).toHaveBeenCalledWith('oc-send-jd', expect.any(Function));
+
+    // Simulate the remove callback to trigger create
+    const removeCallback = chrome.contextMenus.remove.mock.calls[0][1];
+    removeCallback();
+
     expect(chrome.contextMenus.create).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'jfa-capture' })
+      expect.objectContaining({ id: 'oc-send-jd' })
     );
   });
 });
@@ -60,41 +64,107 @@ describe('onInstalled handler', () => {
 // ── Message listener ────────────────────────────────────────────────────────────
 
 describe('runtime.onMessage', () => {
-  it('POPUP_TRIGGER responds ok:false when there is no active tab', async () => {
-    loadBackground();
-    const listener = getMessageListener();
-    chrome.tabs.query.mockImplementation((_q, cb) => cb([]));
+  describe('POPUP_TRIGGER', () => {
+    it('queries the active tab and calls triggerExtraction', async () => {
+      loadBackground();
+      const listener = getMessageListener();
 
-    const sendResponse = jest.fn();
-    listener({ type: 'POPUP_TRIGGER' }, {}, sendResponse);
-    await new Promise(r => setTimeout(r, 0));
+      const tab = { id: 42, title: 'Test Job', url: 'https://example.com/job' };
+      chrome.tabs.query.mockImplementation((_q, cb) => cb([tab]));
+      // Make sendMessage resolve (PING succeeds)
+      chrome.tabs.sendMessage.mockResolvedValue({ alive: true });
+      // Make EXTRACT_JD return a short body so we hit the MIN_JD_CHARS guard
+      chrome.tabs.sendMessage.mockResolvedValueOnce({ alive: true });
+      chrome.tabs.sendMessage.mockResolvedValueOnce({
+        success: false,
+        error: 'Extractor not loaded',
+      });
 
-    expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'No active tab' });
+      const sendResponse = jest.fn();
+      const returnVal = listener({ type: 'POPUP_TRIGGER' }, {}, sendResponse);
+
+      // Must return true to keep the channel open for async response
+      expect(returnVal).toBe(true);
+
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(chrome.tabs.query).toHaveBeenCalledWith(
+        { active: true, currentWindow: true },
+        expect.any(Function)
+      );
+    });
+
+    it('responds with ok:false when no active tab is found', async () => {
+      loadBackground();
+      const listener = getMessageListener();
+
+      chrome.tabs.query.mockImplementation((_q, cb) => cb([]));
+
+      const sendResponse = jest.fn();
+      listener({ type: 'POPUP_TRIGGER' }, {}, sendResponse);
+
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'No active tab' });
+    });
   });
 
-  it('GET_JOB_STATUS resolves stored state', async () => {
-    loadBackground();
-    const listener = getMessageListener();
-    const stored = { status: 'processing', jobId: 'abc' };
-    _storageMock.get.mockImplementation((key, cb) => cb({ [key]: stored }));
+  describe('GET_JOB_STATUS', () => {
+    it('resolves job state from storage and calls sendResponse', async () => {
+      loadBackground();
+      const listener = getMessageListener();
 
-    const sendResponse = jest.fn();
-    listener({ type: 'GET_JOB_STATUS', tabId: 7 }, {}, sendResponse);
-    await new Promise(r => setTimeout(r, 0));
+      // Pre-populate storage
+      const stored = { status: 'processing', jobId: 'abc' };
+      _storageMock.get.mockImplementation((key, cb) => cb({ [key]: stored }));
 
-    expect(sendResponse).toHaveBeenCalledWith(stored);
+      const sendResponse = jest.fn();
+      listener({ type: 'GET_JOB_STATUS', tabId: 7 }, {}, sendResponse);
+
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(sendResponse).toHaveBeenCalledWith(stored);
+    });
+
+    it('returns null when no state is stored for the tab', async () => {
+      loadBackground();
+      const listener = getMessageListener();
+
+      _storageMock.get.mockImplementation((_key, cb) => cb({}));
+
+      const sendResponse = jest.fn();
+      listener({ type: 'GET_JOB_STATUS', tabId: 99 }, {}, sendResponse);
+
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(sendResponse).toHaveBeenCalledWith(null);
+    });
   });
 
-  it('CLEAR_JOB removes state and responds ok', async () => {
-    loadBackground();
-    const listener = getMessageListener();
+  describe('CLEAR_JOB', () => {
+    it('removes the stored state and responds ok', async () => {
+      loadBackground();
+      const listener = getMessageListener();
 
-    const sendResponse = jest.fn();
-    listener({ type: 'CLEAR_JOB', tabId: 5 }, {}, sendResponse);
-    await new Promise(r => setTimeout(r, 0));
+      const sendResponse = jest.fn();
+      listener({ type: 'CLEAR_JOB', tabId: 5 }, {}, sendResponse);
 
-    expect(chrome.storage.local.remove).toHaveBeenCalledWith(stateKey(5), expect.any(Function));
-    expect(sendResponse).toHaveBeenCalledWith({ ok: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(chrome.storage.local.remove).toHaveBeenCalledWith(stateKey(5), expect.any(Function));
+      expect(sendResponse).toHaveBeenCalledWith({ ok: true });
+    });
+  });
+
+  describe('unknown message type', () => {
+    it('does not throw and returns undefined', () => {
+      loadBackground();
+      const listener = getMessageListener();
+
+      expect(() =>
+        listener({ type: 'UNKNOWN_TYPE' }, {}, jest.fn())
+      ).not.toThrow();
+    });
   });
 });
 
@@ -103,105 +173,227 @@ describe('runtime.onMessage', () => {
 describe('tabs.onUpdated', () => {
   it('clears job state when a tab starts loading', () => {
     loadBackground();
+
     const calls = chrome.tabs.onUpdated.addListener.mock.calls;
-    calls[calls.length - 1][0](10, { status: 'loading' });
+    const updatedListener = calls[calls.length - 1][0];
+
+    updatedListener(10, { status: 'loading' });
     expect(chrome.storage.local.remove).toHaveBeenCalledWith(stateKey(10), expect.any(Function));
+  });
+
+  it('does nothing for non-loading changeInfo', () => {
+    loadBackground();
+
+    const calls = chrome.tabs.onUpdated.addListener.mock.calls;
+    const updatedListener = calls[calls.length - 1][0];
+
+    updatedListener(10, { status: 'complete' });
+    expect(chrome.storage.local.remove).not.toHaveBeenCalled();
   });
 });
 
-// ── captureAndSubmit ─────────────────────────────────────────────────────────────
+// ── contextMenu trigger ────────────────────────────────────────────────────────
 
-describe('captureAndSubmit', () => {
-  it('captures the page, POSTs {url,title,text} to /api/pages, and starts polling', async () => {
+describe('contextMenus.onClicked', () => {
+  it('calls triggerExtraction for the oc-send-jd item', async () => {
     loadBackground();
-    const listener = getMessageListener();
 
-    const tab = { id: 7, title: 'Job', url: 'https://linkedin.com/jobs/view/1' };
-    chrome.tabs.query.mockImplementation((_q, cb) => cb([tab]));
-    mockCapture({ text: 'a'.repeat(500) });
+    const handler = getContextMenuListener();
+    const tab = { id: 1, title: 'A Job', url: 'https://example.com' };
 
-    global.fetch = jest.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'job-123', status: 'pending' }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'claimed' }) });
+    chrome.tabs.sendMessage.mockResolvedValue({ alive: true });
+    chrome.tabs.sendMessage.mockResolvedValueOnce({ alive: true });
+    chrome.tabs.sendMessage.mockResolvedValueOnce({
+      success: false, error: 'Extraction failed',
+    });
 
-    listener({ type: 'POPUP_TRIGGER' }, {}, jest.fn());
-    await new Promise(r => setTimeout(r, 50));
+    await handler({ menuItemId: 'oc-send-jd' }, tab);
 
-    // POST body carries the captured page — no client-side extraction
-    const postCall = global.fetch.mock.calls.find(([url]) => url.endsWith('/api/pages'));
-    expect(postCall).toBeDefined();
-    const body = JSON.parse(postCall[1].body);
-    expect(body.url).toBe('https://linkedin.com/jobs/view/1');
-    expect(body.text.length).toBeGreaterThanOrEqual(200);
-    expect(body).not.toHaveProperty('jd_text');
-
-    const setCalls = chrome.storage.local.set.mock.calls.map(c => c[0]);
-    const processing = setCalls.find(c => c[stateKey(7)]?.status === 'processing');
-    expect(processing).toBeDefined();
-    expect(processing[stateKey(7)].jobId).toBe('job-123');
+    // setJobState should have written EXTRACTING status
+    expect(chrome.storage.local.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        [stateKey(1)]: expect.objectContaining({ status: 'extracting' }),
+      }),
+      expect.any(Function)
+    );
   });
 
-  it('errors when the captured page has too little text', async () => {
+  it('ignores clicks for unrelated menu items', async () => {
+    loadBackground();
+
+    const handler = getContextMenuListener();
+    await handler({ menuItemId: 'something-else' }, { id: 1 });
+
+    expect(chrome.storage.local.set).not.toHaveBeenCalled();
+  });
+});
+
+// ── triggerExtraction: content script injection ────────────────────────────────
+
+describe('triggerExtraction — injection path', () => {
+  it('injects scripts when PING fails', async () => {
     loadBackground();
     const listener = getMessageListener();
 
-    const tab = { id: 4, title: 'Blank', url: 'https://example.com' };
+    const tab = { id: 3, title: 'Job', url: 'https://example.com' };
     chrome.tabs.query.mockImplementation((_q, cb) => cb([tab]));
-    mockCapture({ text: 'too short' });
-    global.fetch = jest.fn();
+
+    // PING throws (content script not present)
+    chrome.tabs.sendMessage
+      .mockRejectedValueOnce(new Error('Could not establish connection'))
+      // EXTRACT_JD after injection fails with short body
+      .mockResolvedValueOnce({ success: true, jd: { body: 'short', title: '', company: '', location: '', url: '', site: '' } });
+
+    chrome.scripting.executeScript.mockResolvedValue([]);
 
     listener({ type: 'POPUP_TRIGGER' }, {}, jest.fn());
-    await new Promise(r => setTimeout(r, 20));
+
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    expect(chrome.scripting.executeScript).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: { tabId: 3 },
+        files: expect.arrayContaining(['content_script.js']),
+      })
+    );
+  });
+
+  it('sets ERROR state when script injection itself fails', async () => {
+    loadBackground();
+    const listener = getMessageListener();
+
+    const tab = { id: 4, title: 'Job', url: 'https://example.com' };
+    chrome.tabs.query.mockImplementation((_q, cb) => cb([tab]));
+
+    chrome.tabs.sendMessage.mockRejectedValueOnce(new Error('No content script'));
+    chrome.scripting.executeScript.mockRejectedValueOnce(new Error('Cannot inject into chrome://'));
+
+    listener({ type: 'POPUP_TRIGGER' }, {}, jest.fn());
+
+    await new Promise(resolve => setTimeout(resolve, 50));
 
     expect(chrome.storage.local.set).toHaveBeenCalledWith(
       expect.objectContaining({
-        [stateKey(4)]: expect.objectContaining({ status: 'error', error: expect.stringContaining('readable text') }),
+        [stateKey(4)]: expect.objectContaining({ status: 'error' }),
       }),
-      expect.any(Function),
+      expect.any(Function)
     );
-    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
+
+// ── submitToBridge ─────────────────────────────────────────────────────────────
+
+describe('triggerExtraction — bridge submission', () => {
+  beforeEach(() => {
+    global.fetch = jest.fn();
   });
 
-  it('errors when the Bridge is unreachable', async () => {
+  it('sets ERROR state when JD body is shorter than MIN_JD_CHARS', async () => {
+    loadBackground();
+    const listener = getMessageListener();
+
+    const tab = { id: 5, title: 'Job', url: 'https://example.com' };
+    chrome.tabs.query.mockImplementation((_q, cb) => cb([tab]));
+
+    chrome.tabs.sendMessage
+      .mockResolvedValueOnce({ alive: true }) // PING
+      .mockResolvedValueOnce({
+        success: true,
+        jd: { body: 'too short', title: 'T', company: 'C', location: 'L', url: 'U', site: 'S' },
+      }); // EXTRACT_JD
+
+    listener({ type: 'POPUP_TRIGGER' }, {}, jest.fn());
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    expect(chrome.storage.local.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        [stateKey(5)]: expect.objectContaining({ status: 'error' }),
+      }),
+      expect.any(Function)
+    );
+  });
+
+  it('sets ERROR state when bridge API is unreachable', async () => {
     loadBackground();
     const listener = getMessageListener();
 
     const tab = { id: 6, title: 'Job', url: 'https://example.com' };
     chrome.tabs.query.mockImplementation((_q, cb) => cb([tab]));
-    mockCapture({ text: 'a'.repeat(500) });
-    global.fetch = jest.fn().mockRejectedValueOnce(new Error('fetch failed'));
+
+    const longBody = 'A'.repeat(300);
+    chrome.tabs.sendMessage
+      .mockResolvedValueOnce({ alive: true })
+      .mockResolvedValueOnce({
+        success: true,
+        jd: { body: longBody, title: 'T', company: 'C', location: 'L', url: 'U', site: 'S' },
+      });
+
+    global.fetch.mockRejectedValueOnce(new Error('fetch failed'));
 
     listener({ type: 'POPUP_TRIGGER' }, {}, jest.fn());
-    await new Promise(r => setTimeout(r, 30));
+    await new Promise(resolve => setTimeout(resolve, 50));
 
     expect(chrome.storage.local.set).toHaveBeenCalledWith(
       expect.objectContaining({
-        [stateKey(6)]: expect.objectContaining({ status: 'error', error: expect.stringContaining('Bridge API unreachable') }),
+        [stateKey(6)]: expect.objectContaining({
+          status: 'error',
+          error: expect.stringContaining('Bridge API unreachable'),
+        }),
       }),
-      expect.any(Function),
+      expect.any(Function)
     );
   });
 
-  it('context-menu click on jfa-capture triggers a capture', async () => {
+  it('sets PROCESSING state and starts polling after successful bridge submission', async () => {
     loadBackground();
-    const handler = getContextMenuListener();
-    const tab = { id: 1, title: 'A Job', url: 'https://example.com' };
-    mockCapture({ text: 'too short' }); // short → stops early after writing CAPTURING
+    const listener = getMessageListener();
 
-    await handler({ menuItemId: 'jfa-capture' }, tab);
+    const tab = { id: 7, title: 'Job', url: 'https://example.com' };
+    chrome.tabs.query.mockImplementation((_q, cb) => cb([tab]));
 
-    expect(chrome.storage.local.set).toHaveBeenCalledWith(
-      expect.objectContaining({ [stateKey(1)]: expect.objectContaining({ status: 'capturing' }) }),
-      expect.any(Function),
+    const longBody = 'A'.repeat(300);
+    chrome.tabs.sendMessage
+      .mockResolvedValueOnce({ alive: true })
+      .mockResolvedValueOnce({
+        success: true,
+        jd: { body: longBody, title: 'MyRole', company: 'MyCo', location: 'NYC', url: 'U', site: 'S' },
+      });
+
+    global.fetch
+      // POST /api/jobs
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ job_id: 'job-123' }),
+      })
+      // First poll — still processing
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: 'processing', progress_message: 'Working…' }),
+      });
+
+    listener({ type: 'POPUP_TRIGGER' }, {}, jest.fn());
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    const setCalls = chrome.storage.local.set.mock.calls.map(c => c[0]);
+    const processingCall = setCalls.find(
+      c => c[stateKey(7)]?.status === 'processing'
     );
+    expect(processingCall).toBeDefined();
+    expect(processingCall[stateKey(7)].jobId).toBe('job-123');
   });
 });
 
-// ── pollForCompletion ────────────────────────────────────────────────────────────
+// ── pollForCompletion ──────────────────────────────────────────────────────────
 
+// Helper: flush all pending microtasks and advance fake timers past one poll tick.
+// jest.advanceTimersByTimeAsync (Jest 29+) interleaves microtask flushing with
+// timer advancement, so we don't need manual Promise.resolve() juggling.
 async function driveOnePollTick() {
+  // Flush the async await chain inside triggerExtraction
   for (let i = 0; i < 20; i++) await Promise.resolve();
+  // Advance past POLL_INTERVAL_MS (5 000 ms) so the tick callback fires
   await jest.advanceTimersByTimeAsync(5100);
+  // Flush fetch promise and storage callbacks
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
@@ -210,63 +402,76 @@ describe('pollForCompletion', () => {
     jest.useFakeTimers();
     global.fetch = jest.fn();
   });
-  afterEach(() => { jest.useRealTimers(); });
 
-  function startCapture(tabId) {
-    const listener = getMessageListener();
-    const tab = { id: tabId, title: 'Job', url: 'https://linkedin.com/jobs/view/1' };
-    chrome.tabs.query.mockImplementation((_q, cb) => cb([tab]));
-    mockCapture({ text: 'a'.repeat(500) });
-    listener({ type: 'POPUP_TRIGGER' }, {}, jest.fn());
-  }
+  afterEach(() => {
+    jest.useRealTimers();
+  });
 
-  it('sets COMPLETE and absolutizes relative artifact URLs when bridge returns done', async () => {
+  it('sets COMPLETE state and fires notification when bridge returns complete', async () => {
     loadBackground();
-    global.fetch
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'job-8', status: 'pending' }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({
-        status: 'done', title: 'Staff SDET', fit_score: 82,
-        artifacts: { resume_pdf: '/api/jobs/job-8/resume.pdf', cover_letter_txt: '/api/jobs/job-8/cover_letter.txt' },
-      }) });
+    const listener = getMessageListener();
 
-    startCapture(8);
+    const tab = { id: 8, title: 'Job', url: 'https://example.com' };
+    chrome.tabs.query.mockImplementation((_q, cb) => cb([tab]));
+
+    const longBody = 'A'.repeat(300);
+    chrome.tabs.sendMessage
+      .mockResolvedValueOnce({ alive: true })
+      .mockResolvedValueOnce({
+        success: true,
+        jd: { body: longBody, title: 'MyRole', company: 'MyCo', location: 'NYC', url: 'U', site: 'S' },
+      });
+
+    global.fetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ job_id: 'job-456' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: 'complete',
+          title: 'MyRole',
+          company: 'MyCo',
+          artifacts: { resume_pdf: 'https://cdn/resume.pdf' },
+        }),
+      });
+
+    listener({ type: 'POPUP_TRIGGER' }, {}, jest.fn());
     await driveOnePollTick();
 
-    const completed = chrome.storage.local.set.mock.calls.map(c => c[0])
-      .find(c => c[stateKey(8)]?.status === 'complete');
-    expect(completed).toBeDefined();
-    expect(completed[stateKey(8)].artifacts.resume_pdf).toMatch(/^https?:\/\/.+\/api\/jobs\/job-8\/resume\.pdf$/);
-    expect(completed[stateKey(8)].fitScore).toBe(82);
+    const setCalls = chrome.storage.local.set.mock.calls.map(c => c[0]);
+    const completedCall = setCalls.find(c => c[stateKey(8)]?.status === 'complete');
+    expect(completedCall).toBeDefined();
+    expect(completedCall[stateKey(8)].artifacts).toEqual({ resume_pdf: 'https://cdn/resume.pdf' });
     expect(chrome.notifications.create).toHaveBeenCalled();
   }, 15_000);
 
-  it('treats a done job with no artifacts as "not a job posting"', async () => {
+  it('sets ERROR state when bridge returns error status', async () => {
     loadBackground();
-    global.fetch
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'job-nj', status: 'pending' }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'done' }) });
+    const listener = getMessageListener();
 
-    startCapture(11);
+    const tab = { id: 9, title: 'Job', url: 'https://example.com' };
+    chrome.tabs.query.mockImplementation((_q, cb) => cb([tab]));
+
+    const longBody = 'A'.repeat(300);
+    chrome.tabs.sendMessage
+      .mockResolvedValueOnce({ alive: true })
+      .mockResolvedValueOnce({
+        success: true,
+        jd: { body: longBody, title: 'T', company: 'C', location: 'L', url: 'U', site: 'S' },
+      });
+
+    global.fetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'job-err' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'error', error: 'Pipeline failed' }) });
+
+    listener({ type: 'POPUP_TRIGGER' }, {}, jest.fn());
     await driveOnePollTick();
 
-    const errored = chrome.storage.local.set.mock.calls.map(c => c[0])
-      .find(c => c[stateKey(11)]?.status === 'error');
-    expect(errored).toBeDefined();
-    expect(errored[stateKey(11)].error).toMatch(/job posting/i);
-  }, 15_000);
-
-  it('sets ERROR when bridge returns error status', async () => {
-    loadBackground();
-    global.fetch
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'job-e', status: 'pending' }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'error', error: 'Extraction failed' }) });
-
-    startCapture(9);
-    await driveOnePollTick();
-
-    const errored = chrome.storage.local.set.mock.calls.map(c => c[0])
-      .find(c => c[stateKey(9)]?.status === 'error');
-    expect(errored).toBeDefined();
-    expect(errored[stateKey(9)].error).toBe('Extraction failed');
+    const setCalls = chrome.storage.local.set.mock.calls.map(c => c[0]);
+    const errorCall = setCalls.find(c => c[stateKey(9)]?.status === 'error');
+    expect(errorCall).toBeDefined();
+    expect(errorCall[stateKey(9)].error).toBe('Pipeline failed');
   }, 15_000);
 });

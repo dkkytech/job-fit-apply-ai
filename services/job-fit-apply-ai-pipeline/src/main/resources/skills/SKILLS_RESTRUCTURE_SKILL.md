@@ -33,8 +33,8 @@ Rules (non-negotiable):
 2. **Logical categories** (use whichever apply): Languages, Frameworks, Testing, CI/CD, Cloud, Observability, Databases, Security, Mobile, Data, Leadership.
 3. **Order categories by JD relevance** — most relevant category first. JD-matched skills lead within each category.
    The highest-priority skills should appear in the first 150 characters of restructured_text.
-4. **Exact JD phrasing for matched skills — same skill only.** When the JD and the candidate name the *same* skill with different spelling, casing, or abbreviation, use the JD's form — e.g. resume "GH Actions" and JD "GitHub Actions" → "GitHub Actions"; resume "Postgres" and JD "PostgreSQL" → "PostgreSQL".
-   Never substitute a *different* tool to match the JD: "XCTest" is not "XCUITest", "Selenium" is not "Playwright", "Jenkins" is not "GitHub Actions". If the JD asks for a tool the candidate does not have, it simply stays absent.
+4. **Exact JD phrasing for matched skills** — if the JD says "XCUITest" and the resume says "XCTest", output "XCUITest".
+   Use the JD's exact terminology for any skill that maps to a JD requirement.
 5. **removed_for_this_role** must be skills that genuinely appear on the resume. They must still appear in the output.
 6. **restructured_text** must be a single, continuous string. Use " | " as the category separator and ", " between skills.
 7. **Expand abbreviations only if the JD uses the full form** — e.g., if the JD says "Continuous Integration", output "CI/CD (Continuous Integration)". Otherwise keep the abbreviation.

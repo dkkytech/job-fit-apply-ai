@@ -72,7 +72,4 @@ class IngestionPipeline {
     fun resetBatch() = scrapeNode.resetBatch()
     fun batchBlockedDomains(): Set<String> = scrapeNode.batchBlockedDomains.toSet()
     fun batchLinkedInSessionExpired(): Boolean = scrapeNode.batchLinkedInSessionExpired
-
-    /** Release the scraper's shared CDP browser connection. Call when the batch is done. */
-    fun close() = scrapeNode.close()
 }

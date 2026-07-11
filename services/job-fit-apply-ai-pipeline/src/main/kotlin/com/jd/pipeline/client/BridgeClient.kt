@@ -80,7 +80,12 @@ class BridgeClient(
             if (resp.code == 204) return@execute null
             val body = EntityUtils.toString(resp.entity, Charsets.UTF_8)
             check(resp.code == 200) { "GET /api/queue/claim → ${resp.code}: $body" }
-            parseClaimTree(mapper.readTree(body))
+            val tree = mapper.readTree(body)
+            val jobId = tree.get("job_id").asText()
+            val jdNode = tree.get("jd_record")
+                ?: throw RuntimeException("claim response missing jd_record")
+            val record = mapper.treeToValue(jdNode, JdRecord::class.java)
+            ClaimDto(jobId = jobId, jdRecord = record)
         }
     }
 
@@ -131,51 +136,7 @@ data class JobStatusDto(
     val error: String? = null,
 )
 
-/** Work-item type discriminator (mirrors the bridge's WorkItemType — DTOs duplicated per service). */
-object WorkItemType {
-    const val EMAIL_RAW   = "EMAIL_RAW"    // raw email — the Processor scans/scrapes it
-    const val JD_SCRAPED  = "JD_SCRAPED"   // pre-structured JdRecord (JSearch / digest child)
-    const val JD_PAGE_RAW = "JD_PAGE_RAW"  // raw captured web-page content — the Processor LLM-extracts it
-}
-
-/** A raw email claimed from the queue (payload of an EMAIL_RAW item). */
-data class ClaimedEmail(
-    val messageId: String,
-    val subject: String = "",
-    val body: String = "",
-    val htmlBody: String? = null,
-    val from: String = "",
-    val isRecruiterHint: Boolean = false,
-)
-
-/** Raw captured page content claimed from the queue (payload of a JD_PAGE_RAW item). */
-data class ClaimedPageCapture(
-    val url: String,
-    val text: String,
-    val title: String = "",
-)
-
 data class ClaimDto(
     val jobId: String,
-    val type: String = WorkItemType.JD_SCRAPED,
-    val jdRecord: JdRecord? = null,               // set for JD_SCRAPED
-    val email: ClaimedEmail? = null,              // set for EMAIL_RAW
-    val pageCapture: ClaimedPageCapture? = null,  // set for JD_PAGE_RAW
+    val jdRecord: JdRecord,
 )
-
-/** Parse a /api/queue/claim response body into a [ClaimDto], branching on the work-item type. */
-internal fun parseClaimTree(tree: com.fasterxml.jackson.databind.JsonNode): ClaimDto {
-    val mapper = Json.mapper
-    val jobId = tree.get("job_id").asText()
-    val type = tree.get("type")?.asText() ?: WorkItemType.JD_SCRAPED
-    val payload = tree.get("jd_record")
-        ?: throw RuntimeException("claim response missing jd_record")
-    return when (type) {
-        WorkItemType.EMAIL_RAW ->
-            ClaimDto(jobId = jobId, type = type, email = mapper.treeToValue(payload, ClaimedEmail::class.java))
-        WorkItemType.JD_PAGE_RAW ->
-            ClaimDto(jobId = jobId, type = type, pageCapture = mapper.treeToValue(payload, ClaimedPageCapture::class.java))
-        else ->
-            ClaimDto(jobId = jobId, type = type, jdRecord = mapper.treeToValue(payload, JdRecord::class.java))
-    }
-}

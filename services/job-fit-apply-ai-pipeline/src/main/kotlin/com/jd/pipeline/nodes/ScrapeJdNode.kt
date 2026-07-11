@@ -1,8 +1,6 @@
 package com.jd.pipeline.nodes
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.jd.pipeline.client.AlertService
-import com.jd.pipeline.client.ChromeCdpBrowser
 import com.jd.pipeline.client.LlmCaller
 import com.jd.pipeline.client.LlmClient
 import com.jd.pipeline.config.Config
@@ -35,11 +33,7 @@ import java.util.regex.Pattern
  * Jackson replaces all regex JSON parsing.
  */
 class ScrapeJdNode(
-    private val llm: LlmCaller = LlmClient.fromModelString(Config.SCRAPE_MODEL, jsonMode = true, temperature = 0.0, nodeKey = "scrape_jd"),
-    // Long-lived Chrome connected over CDP (one tab per domain, warm session). When the endpoint
-    // is unreachable the scraper falls back to the legacy per-job profile-copy / clean-launch path.
-    private val cdpBrowser: ChromeCdpBrowser = ChromeCdpBrowser(),
-    private val alerts: AlertService = AlertService(),
+    private val llm: LlmCaller = LlmClient.fromModelString(Config.SCRAPE_MODEL, jsonMode = true, temperature = 0.0, nodeKey = "scrape_jd")
 ) : Node<JDState> {
 
     /** Set to false to suppress verbose progress logging (e.g. during tuner runs). */
@@ -53,17 +47,11 @@ class ScrapeJdNode(
     // invocation — one attempt per domain, then skip with a clear reason.
     val batchBlockedDomains: MutableSet<String> = mutableSetOf()
     var batchLinkedInSessionExpired: Boolean = false
-    // Fire the "debug Chrome unreachable" alert at most once per batch.
-    var batchCdpUnavailableAlerted: Boolean = false
 
     fun resetBatch() {
         batchBlockedDomains.clear()
         batchLinkedInSessionExpired = false
-        batchCdpUnavailableAlerted = false
     }
-
-    /** Release the shared CDP browser connection (disconnects only — does not close the user's Chrome). */
-    fun close() = cdpBrowser.close()
 
     private val mapper = ObjectMapper()
 
@@ -72,7 +60,7 @@ class ScrapeJdNode(
         .followRedirects(HttpClient.Redirect.NORMAL)
         .build()
 
-    data class PageContent(val rawHtml: String, val cleanedText: String, val blockReason: String = "", val isCaptchaBlock: Boolean = false, val isBotBlock: Boolean = false, val scrapePath: String = "")
+    data class PageContent(val rawHtml: String, val cleanedText: String, val blockReason: String = "", val isCaptchaBlock: Boolean = false)
 
     companion object {
         private val DEFAULT_SCRAPE_SKILL_PROMPT = """
@@ -107,13 +95,6 @@ class ScrapeJdNode(
 
         if (jobUrl.isNullOrEmpty()) {
             return input
-        }
-
-        // Browser-extension path: the page was already rendered in the user's authenticated
-        // session, so skip fetching/auth-gating entirely and extract from the captured text.
-        if (input.capturedText.isNotBlank()) {
-            log("[scrape_jd] Using captured page text (${input.capturedText.length} chars) for $jobUrl — no fetch")
-            return parseJobPage(input, jobUrl, input.capturedText).copy(scrapePath = "captured")
         }
 
         val host = extractHost(jobUrl)
@@ -151,16 +132,16 @@ class ScrapeJdNode(
             if (page.blockReason.isNotEmpty()) {
                 log("[scrape_jd] Blocked for $jobUrl: ${page.blockReason}")
                 batchBlockedDomains.add(host)
-                return input.copy(error = "scrape_jd: ${page.blockReason}", scrapePath = "blocked")
+                return input.copy(error = "scrape_jd: ${page.blockReason}")
             }
 
             if (page.cleanedText.isEmpty()) {
                 log("[scrape_jd] Empty page content for $jobUrl")
-                return input.copy(error = "scrape_jd: empty page content", scrapePath = "empty")
+                return input.copy(error = "scrape_jd: empty page content")
             }
 
             parseJobPage(input, jobUrl, page.cleanedText)
-                .copy(rawPageContent = page.rawHtml, scrapePath = page.scrapePath)
+                .copy(rawPageContent = page.rawHtml)
         } catch (e: Exception) {
             log("[scrape_jd] Error fetching $jobUrl: ${e.message}")
             when (e) {
@@ -188,33 +169,18 @@ class ScrapeJdNode(
                 return PageContent(
                     rawHtml = "",
                     cleanedText = "",
-                    blockReason = "LinkedIn auth expired",
-                    scrapePath = "blocked"
+                    blockReason = "LinkedIn auth expired"
                 )
             }
             return fetchLinkedInPageWithPlaywright(url)
         }
 
-        // Proactive CDP for known soft-blocking / challenge-prone domains: skip HTTP and use the
-        // warm browser directly (fetchPageWithPlaywright falls back to a clean launch + alert if
-        // the debug Chrome is down).
-        if (isForceCdpHost(host)) {
-            log("[scrape_jd] Force-CDP domain: $host — routing to browser")
-            return fetchPageWithPlaywright(url).copy(scrapePath = "cdp_forced")
-        }
-
         val httpResult = fetchPageOverHttp(url)
-        if ((httpResult.isCaptchaBlock || httpResult.isBotBlock) && Config.PLAYWRIGHT_FALLBACK_ON_CAPTCHA) {
-            log("[scrape_jd] HTTP blocked ($host: ${httpResult.blockReason}) — retrying with Playwright")
-            return fetchPageWithPlaywright(url).copy(scrapePath = "playwright_clean")
+        if (httpResult.isCaptchaBlock && Config.PLAYWRIGHT_FALLBACK_ON_CAPTCHA) {
+            log("[scrape_jd] HTTP CAPTCHA-blocked ($host: ${httpResult.blockReason}) — retrying with Playwright")
+            return fetchPageWithPlaywright(url)
         }
-        if (httpResult.blockReason.isEmpty() &&
-            httpResult.cleanedText.length < Config.PLAYWRIGHT_FALLBACK_MIN_CONTENT_LENGTH &&
-            Config.PLAYWRIGHT_FALLBACK_ON_THIN_CONTENT) {
-            log("[scrape_jd] Thin content ($host: ${httpResult.cleanedText.length} chars) — retrying with Playwright")
-            return fetchPageWithPlaywright(url).copy(scrapePath = "playwright_clean")
-        }
-        return httpResult.copy(scrapePath = "http")
+        return httpResult
     }
 
     private fun fetchPageOverHttp(url: String): PageContent {
@@ -239,7 +205,7 @@ class ScrapeJdNode(
             when (status) {
                 403 -> {
                     log("[scrape_jd] HTTP 403 (bot-blocked) for $url")
-                    return PageContent("", "", "HTTP 403 — bot-blocked or auth required", isBotBlock = true)
+                    return PageContent("", "", "HTTP 403 — bot-blocked or auth required")
                 }
                 429 -> {
                     log("[scrape_jd] HTTP 429 (rate-limited) for $url")
@@ -362,26 +328,7 @@ class ScrapeJdNode(
         return null
     }
 
-    /**
-     * Fetch a LinkedIn job page using the logged-in profile. Prefers the long-lived CDP Chrome
-     * (warm session, no profile copy, reused per-domain tab); falls back to the legacy per-job
-     * profile-copy launch when the debug Chrome is unreachable, alerting once per batch.
-     */
     private fun fetchLinkedInPageWithPlaywright(url: String): PageContent {
-        if (cdpBrowser.isAvailable()) {
-            log("[scrape_jd] Using CDP Chrome for LinkedIn: $url")
-            val page = cdpBrowser.pageForDomain(extractHost(url))
-            return scrapeLinkedInPage(page, url).copy(scrapePath = "cdp_profile")
-        }
-        alertCdpUnavailable()
-        return fetchLinkedInPageWithProfileCopy(url).copy(scrapePath = "playwright_profile")
-    }
-
-    /**
-     * Legacy path: copy the Chrome profile into an isolated temp dir and launch a throwaway
-     * persistent context. Used only when the CDP debug Chrome is unreachable.
-     */
-    private fun fetchLinkedInPageWithProfileCopy(url: String): PageContent {
         val sourceUserDataDir = Paths.get(Config.CHROME_USER_DATA_DIR)
         val profileDirectory = Config.CHROME_PROFILE_DIRECTORY
 
@@ -394,7 +341,7 @@ class ScrapeJdNode(
             throw RuntimeException("Chrome profile directory not found: $profilePath")
         }
 
-        log("[scrape_jd] Using Playwright (profile copy) for LinkedIn with profile: $profilePath")
+        log("[scrape_jd] Using Playwright for LinkedIn with profile: $profilePath")
 
         val isolatedUserDataDir = createIsolatedChromeUserDataDir(sourceUserDataDir, profileDirectory)
         var playwright: Playwright? = null
@@ -411,55 +358,37 @@ class ScrapeJdNode(
             launchedContext.setDefaultNavigationTimeout(Config.PLAYWRIGHT_TIMEOUT_MS)
 
             val page = launchedContext.pages().firstOrNull() ?: launchedContext.newPage()
-            return scrapeLinkedInPage(page, url)
+            page.navigate(url, Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED).setTimeout(25000.0))
+            waitForLinkedInPage(page)
+            log("[scrape_jd] LinkedIn final URL: ${page.url()}")
+            log("[scrape_jd] LinkedIn title: ${runCatching { page.title() }.getOrDefault("")}")
+
+            if (isLinkedInLoginPage(page)) {
+                throw LinkedInAuthenticationException(
+                    "LinkedIn session is not authenticated for Chrome profile $profileDirectory"
+                )
+            }
+
+            if (isLinkedInCaptchaPage(page)) {
+                throw CaptchaBlockedException("LinkedIn CAPTCHA/security challenge at ${page.url()}")
+            }
+
+            dismissLinkedInPopups(page)
+            expandLinkedInJobDescription(page)
+
+            val rawHtml = page.content()
+            val captchaReason = detectCaptchaInHtml(rawHtml)
+            if (captchaReason != null) {
+                throw CaptchaBlockedException("LinkedIn page blocked — $captchaReason")
+            }
+
+            val visibleText = extractLinkedInVisibleText(page)
+            log("[scrape_jd] LinkedIn text preview: ${visibleText.take(300)}")
+            return buildPageContent(rawHtml, visibleText)
         } finally {
             runCatching { launchedContext?.close() }
             runCatching { playwright?.close() }
             deleteDirectoryRecursively(isolatedUserDataDir)
-        }
-    }
-
-    /**
-     * Drive a LinkedIn job page that is already open in [page]: navigate, wait, detect
-     * login/CAPTCHA (throwing the matching exception), dismiss popups, expand the description,
-     * and extract content. Does NOT close [page] — the caller owns its lifecycle (a CDP tab is
-     * reused; a profile-copy context is closed by its `finally`).
-     */
-    private fun scrapeLinkedInPage(page: Page, url: String): PageContent {
-        page.navigate(url, Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED).setTimeout(25000.0))
-        waitForLinkedInPage(page)
-        log("[scrape_jd] LinkedIn final URL: ${page.url()}")
-        log("[scrape_jd] LinkedIn title: ${runCatching { page.title() }.getOrDefault("")}")
-
-        if (isLinkedInLoginPage(page)) {
-            throw LinkedInAuthenticationException(
-                "LinkedIn session is not authenticated for Chrome profile ${Config.CHROME_PROFILE_DIRECTORY}"
-            )
-        }
-
-        if (isLinkedInCaptchaPage(page)) {
-            throw CaptchaBlockedException("LinkedIn CAPTCHA/security challenge at ${page.url()}")
-        }
-
-        dismissLinkedInPopups(page)
-        expandLinkedInJobDescription(page)
-
-        val rawHtml = page.content()
-        val captchaReason = detectCaptchaInHtml(rawHtml)
-        if (captchaReason != null) {
-            throw CaptchaBlockedException("LinkedIn page blocked — $captchaReason")
-        }
-
-        val visibleText = extractLinkedInVisibleText(page)
-        log("[scrape_jd] LinkedIn text preview: ${visibleText.take(300)}")
-        return buildPageContent(rawHtml, visibleText)
-    }
-
-    /** Fire the "debug Chrome unreachable" alert once per batch, only when an endpoint is configured. */
-    private fun alertCdpUnavailable() {
-        if (Config.CHROME_CDP_ENDPOINT.isNotBlank() && !batchCdpUnavailableAlerted) {
-            batchCdpUnavailableAlerted = true
-            alerts.chromeDebugUnavailable(Config.CHROME_CDP_ENDPOINT)
         }
     }
 
@@ -583,95 +512,16 @@ class ScrapeJdNode(
         }
 
         val document = Jsoup.parse(rawHtml)
-        // Extract schema.org JobPosting JSON-LD before stripping <script> tags. Most
-        // job boards/ATS (Indeed, Monster, ZipRecruiter, Lever, Greenhouse, Workday…)
-        // embed the full, clean JD here — far better than scraping visible text, and
-        // it's the difference between a real JD and a thin digest summary for scoring.
-        val jsonLdJob = extractJobPostingJsonLd(document)
         document.select("script,style,noscript").remove()
 
         var text = preferredVisibleText?.takeIf { it.isNotBlank() } ?: document.text()
         text = text.replace(Regex("\\s+"), " ").trim()
 
-        val prefixes = buildList {
-            if (nextDataJson.isNotEmpty()) add("PAGE_JSON_DATA:\n$nextDataJson")
-            if (jsonLdJob != null) add(jsonLdJob)
-        }
-        if (prefixes.isNotEmpty()) {
-            text = prefixes.joinToString("\n\n") + "\n\n" + text
+        if (nextDataJson.isNotEmpty()) {
+            text = "PAGE_JSON_DATA:\n$nextDataJson\n\n$text"
         }
 
         return PageContent(rawHtml, text)
-    }
-
-    /**
-     * Extract a schema.org `JobPosting` from `application/ld+json` script blocks and
-     * render it as a clean, labeled text block (title, company, location, salary,
-     * employment type, full description). Returns null when no usable JobPosting with
-     * a substantive description is found. Handles single objects, arrays, and `@graph`.
-     */
-    internal fun extractJobPostingJsonLd(html: String): String? = extractJobPostingJsonLd(Jsoup.parse(html))
-
-    internal fun extractJobPostingJsonLd(document: org.jsoup.nodes.Document): String? {
-        for (script in document.select("script[type=application/ld+json]")) {
-            val json = script.data().trim()
-            if (json.isBlank()) continue
-            val root = try { mapper.readTree(json) } catch (_: Exception) { null }
-            if (root == null) continue
-            val posting = findJobPostingNode(root) ?: continue
-
-            val descHtml = posting.path("description").asText("")
-            if (descHtml.isBlank()) continue
-            val descText = Jsoup.parse(descHtml).text().replace(Regex("\\s+"), " ").trim()
-            if (descText.length < 100) continue  // too thin to be a real JD body
-
-            val title = posting.path("title").asText("").trim()
-            val company = posting.path("hiringOrganization").path("name").asText("").trim()
-            val loc = posting.path("jobLocation").let { jl ->
-                val addr = (if (jl.isArray) jl.firstOrNull() else jl)?.path("address")
-                listOfNotNull(
-                    addr?.path("addressLocality")?.asText("")?.takeIf { it.isNotBlank() },
-                    addr?.path("addressRegion")?.asText("")?.takeIf { it.isNotBlank() },
-                ).joinToString(", ")
-            }
-            val salary = posting.path("baseSalary").path("value").let { v ->
-                val min = v.path("minValue").asText(""); val max = v.path("maxValue").asText("")
-                val unit = v.path("unitText").asText("")
-                when {
-                    min.isNotBlank() && max.isNotBlank() -> "$min - $max ${unit}".trim()
-                    min.isNotBlank() -> "$min ${unit}".trim()
-                    else -> ""
-                }
-            }
-            val employmentType = posting.path("employmentType").let {
-                if (it.isArray) it.joinToString(", ") { e -> e.asText() } else it.asText("")
-            }.trim()
-
-            return buildString {
-                appendLine("STRUCTURED_JOB_DATA (authoritative — prefer over visible text):")
-                if (title.isNotBlank()) appendLine("Title: $title")
-                if (company.isNotBlank()) appendLine("Company: $company")
-                if (loc.isNotBlank()) appendLine("Location: $loc")
-                if (salary.isNotBlank()) appendLine("Salary: $salary")
-                if (employmentType.isNotBlank()) appendLine("Employment type: $employmentType")
-                appendLine("Description: $descText")
-            }.trim()
-        }
-        return null
-    }
-
-    private fun findJobPostingNode(node: com.fasterxml.jackson.databind.JsonNode): com.fasterxml.jackson.databind.JsonNode? {
-        when {
-            node.isObject -> {
-                val type = node.path("@type")
-                val isJob = (type.isTextual && type.asText() == "JobPosting") ||
-                    (type.isArray && type.any { it.asText() == "JobPosting" })
-                if (isJob) return node
-                if (node.has("@graph")) findJobPostingNode(node.path("@graph"))?.let { return it }
-            }
-            node.isArray -> for (el in node) findJobPostingNode(el)?.let { return it }
-        }
-        return null
     }
 
     private fun extractHost(url: String): String {
@@ -685,17 +535,6 @@ class ScrapeJdNode(
     private fun isLinkedInHost(host: String): Boolean {
         return host == "linkedin.com" || host.endsWith(".linkedin.com")
     }
-
-    // Domains configured to always scrape via the CDP browser (parsed once from CDP_FORCE_DOMAINS).
-    private val forceCdpDomains: List<String> by lazy {
-        Config.CDP_FORCE_DOMAINS.split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
-    }
-
-    private fun isForceCdpHost(host: String): Boolean = matchesDomainSuffix(host, forceCdpDomains)
-
-    /** True when [host] equals, or is a subdomain of, any entry in [domains]. */
-    internal fun matchesDomainSuffix(host: String, domains: List<String>): Boolean =
-        domains.any { host == it || host.endsWith(".$it") }
 
     // ── LLM extraction ────────────────────────────────────────────────────────
 
@@ -1123,31 +962,11 @@ class ScrapeJdNode(
     }
 
     /**
-     * Fetches a JS-rendered page when the plain HTTP fetch is blocked (Cloudflare challenge, 403)
-     * or returns thin SPA content. Prefers the warm CDP Chrome — a real, logged-in browser clears
-     * bot checks far better than a cold headless launch — and falls back to a clean headless
-     * Playwright session when the debug Chrome is unreachable (alerting once per batch).
+     * Fetches a page using a clean Playwright browser session (no Chrome profile, no cookies).
+     * Used as a fallback when the plain HTTP fetch is blocked by a Cloudflare JS challenge or
+     * other bot-detection that a real browser can solve by executing JavaScript.
      */
     private fun fetchPageWithPlaywright(url: String): PageContent {
-        if (cdpBrowser.isAvailable()) {
-            return try {
-                log("[scrape_jd] Using CDP Chrome for $url")
-                val page = cdpBrowser.pageForDomain(extractHost(url))
-                extractDynamicPage(page, url)
-            } catch (e: Exception) {
-                log("[scrape_jd] CDP fetch failed for $url: ${e.message} — using clean launch")
-                fetchPageWithCleanLaunch(url)
-            }
-        }
-        alertCdpUnavailable()
-        return fetchPageWithCleanLaunch(url)
-    }
-
-    /**
-     * Legacy fallback: a clean Playwright browser session (no Chrome profile, no cookies) with
-     * anti-automation flags. Used only when the CDP debug Chrome is unreachable.
-     */
-    private fun fetchPageWithCleanLaunch(url: String): PageContent {
         var playwright: Playwright? = null
         try {
             playwright = Playwright.create()
@@ -1168,48 +987,27 @@ class ScrapeJdNode(
             // Hide the webdriver flag so bot-detection JS sees a regular browser
             context.addInitScript("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
 
-            return extractDynamicPage(context.newPage(), url)
+            val page = context.newPage()
+            page.navigate(url, Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED).setTimeout(30000.0))
+            runCatching {
+                page.waitForLoadState(LoadState.LOAD, Page.WaitForLoadStateOptions().setTimeout(15000.0))
+            }
+
+            val rawHtml = page.content()
+            val captchaReason = detectCaptchaInHtml(rawHtml)
+            if (captchaReason != null) {
+                log("[scrape_jd] Playwright fetch still blocked: $captchaReason")
+                return PageContent(rawHtml, "", "Playwright: $captchaReason")
+            }
+
+            log("[scrape_jd] Playwright fetch succeeded for $url")
+            return buildPageContent(rawHtml)
         } catch (e: Exception) {
             log("[scrape_jd] Playwright fallback failed for $url: ${e.message}")
             return PageContent("", "", "Playwright error: ${e.message}")
         } finally {
             runCatching { playwright?.close() }
         }
-    }
-
-    /**
-     * Navigate [page] to [url], wait for load + SPA hydration, and extract content. Shared by the
-     * CDP and clean-launch fallback paths. Does not close [page]; the caller owns its lifecycle.
-     */
-    private fun extractDynamicPage(page: Page, url: String): PageContent {
-        page.navigate(url, Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED).setTimeout(30000.0))
-        runCatching {
-            page.waitForLoadState(LoadState.LOAD, Page.WaitForLoadStateOptions().setTimeout(15000.0))
-        }
-        // Wait for SPA content hydration (WttJ, Jobright, other React/Next.js sites)
-        runCatching {
-            page.waitForSelector(
-                "[data-testid='job-description'], article, .job-description, main",
-                Page.WaitForSelectorOptions()
-                    .setState(WaitForSelectorState.VISIBLE)
-                    .setTimeout(8000.0)
-            )
-        }
-
-        val rawHtml = page.content()
-        val captchaReason = detectCaptchaInHtml(rawHtml)
-        if (captchaReason != null) {
-            log("[scrape_jd] Playwright fetch still blocked: $captchaReason")
-            return PageContent(rawHtml, "", "Playwright: $captchaReason")
-        }
-
-        // Prefer innerText for SPA-rendered content (cleaner than Jsoup on a hydrated DOM), but
-        // still run buildPageContent so embedded __NEXT_DATA__ / schema.org JSON-LD is extracted
-        // like the HTTP path does — otherwise force-CDP sites (e.g. Jobright) lose their structured
-        // extraction. buildPageContent keeps the visible text as the primary body when supplied.
-        val visibleText = runCatching { page.innerText("body") }.getOrElse { "" }
-        log("[scrape_jd] Playwright fetch succeeded for $url")
-        return buildPageContent(rawHtml, visibleText.takeIf { it.length > 200 })
     }
 
     private class LinkedInAuthenticationException(message: String) : RuntimeException(message)

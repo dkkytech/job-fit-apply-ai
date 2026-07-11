@@ -1,7 +1,6 @@
 package com.jd.pipeline.nodes
 
-import com.jd.pipeline.client.GatewayProvider
-import com.jd.pipeline.client.SupabaseGateway
+import com.jd.pipeline.client.SupabaseClient
 import com.jd.pipeline.config.Config
 import com.jd.pipeline.state.JDState
 import java.time.Instant
@@ -22,14 +21,12 @@ import java.util.concurrent.ConcurrentHashMap
  * Primary: Supabase query (persists across process restarts).
  * Fallback: in-memory set (used when Supabase is not configured — local dev / tests).
  */
-class CheckDuplicateNode(
-    private val gateway: SupabaseGateway = GatewayProvider.active
-) : Node<JDState> {
+class CheckDuplicateNode : Node<JDState> {
 
     override fun process(input: JDState): JDState {
         val key = buildKey(input.company, input.roleTitle, input.location)
 
-        val isDuplicate = if (gateway.isConfigured()) {
+        val isDuplicate = if (SupabaseClient.isConfigured()) {
             querySupabase(input.company, input.roleTitle, input.location)
         } else {
             // Offline fallback — in-memory only, resets on restart
@@ -60,7 +57,7 @@ class CheckDuplicateNode(
                 .minus(Config.DUPLICATE_WINDOW_DAYS.toLong(), ChronoUnit.DAYS)
                 .toString()   // ISO-8601, e.g. "2025-03-13T10:00:00Z"
 
-            val rows = gateway.query(
+            val rows = SupabaseClient.query(
                 table = "tracks",
                 filters = mapOf(
                     "company"    to "eq.$company",

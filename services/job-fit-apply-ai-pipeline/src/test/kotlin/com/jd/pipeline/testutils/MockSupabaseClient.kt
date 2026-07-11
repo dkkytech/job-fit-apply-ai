@@ -2,13 +2,12 @@ package com.jd.pipeline.testutils
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.jd.pipeline.client.SupabaseGateway
 
 /**
  * Mock Supabase client for integration testing.
  * Simulates all Supabase database operations without connecting to real DB.
  */
-class MockSupabaseClient : SupabaseGateway {
+class MockSupabaseClient {
 
     private val mapper = ObjectMapper()
 
@@ -26,10 +25,7 @@ class MockSupabaseClient : SupabaseGateway {
     var shouldFailQuery = false
     var failMessage = "Mock failure"
 
-    /** Toggle to simulate the "Supabase not configured in .env" path. */
-    var configured = true
-
-    override fun isConfigured(): Boolean = configured
+    fun isConfigured(): Boolean = true
 
     fun reset() {
         jobs.clear()
@@ -41,7 +37,6 @@ class MockSupabaseClient : SupabaseGateway {
         shouldFailInsert = false
         shouldFailPatch = false
         shouldFailQuery = false
-        configured = true
     }
 
     fun addJob(job: Map<String, Any?>) {
@@ -52,7 +47,7 @@ class MockSupabaseClient : SupabaseGateway {
         tracks.add(track.toMutableMap())
     }
 
-    override fun insert(table: String, record: Map<String, Any?>): JsonNode {
+    fun insert(table: String, record: Map<String, Any?>): JsonNode {
         if (shouldFailInsert) throw RuntimeException(failMessage)
         insertCalls.add(table to record)
 
@@ -89,7 +84,7 @@ class MockSupabaseClient : SupabaseGateway {
         }
     }
 
-    override fun query(table: String, filters: Map<String, String>, select: String, limit: Int): List<JsonNode> {
+    fun query(table: String, filters: Map<String, String>, select: String = "*", limit: Int = 10): List<JsonNode> {
         if (shouldFailQuery) throw RuntimeException(failMessage)
         queryCalls.add(table to filters)
 
@@ -117,16 +112,6 @@ class MockSupabaseClient : SupabaseGateway {
         }
 
         return filtered.take(limit).map { mapper.valueToTree(it) }
-    }
-
-    override fun delete(table: String, filterCol: String, filterVal: String) {
-        val targetList = when (table) {
-            "jobs" -> jobs
-            "resume_artifacts" -> resumeArtifacts
-            "tracks" -> tracks
-            else -> return
-        }
-        targetList.removeAll { it[filterCol]?.toString() == filterVal }
     }
 
     fun getJobCount() = jobs.size

@@ -76,6 +76,11 @@ object CliOutput {
             println("    → job_url: $jobUrl")
         }
 
+        val trackUrl = result.trackUrl
+        if (trackUrl.isNotEmpty()) {
+            println("    → supabase: $trackUrl")
+        }
+
         if (result.isRecruiterResponseRequired) {
             val draftId = result.draftId
             println("    → draft reply: ${if (draftId.isNotEmpty()) draftId else "(queued)"}")
@@ -169,6 +174,7 @@ object CliOutput {
         obj["output_path"] = state["output_path"] ?: ""
         obj["fit_score"] = state["fit_score"] ?: 0
         obj["pipeline_action"] = state["pipeline_action"] ?: "skip"
+        obj["track_url"] = state["track_url"] ?: ""
         obj["artifact_url"] = state["artifact_url"] ?: ""
         obj["error"] = state["error"] ?: ""
         val mapper = ObjectMapper()
@@ -180,6 +186,7 @@ object CliOutput {
         obj["output_path"] = state.outputPath
         obj["fit_score"] = state.fitScore?.toDouble() ?: 0
         obj["pipeline_action"] = state.pipelineAction.asDbValue()
+        obj["track_url"] = state.trackUrl
         obj["artifact_url"] = state.artifactUrl
         obj["error"] = state.error
         val mapper = ObjectMapper()

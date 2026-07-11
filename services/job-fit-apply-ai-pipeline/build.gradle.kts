@@ -21,7 +21,10 @@ dependencies {
     // HTTP Client
     implementation("org.apache.httpcomponents.client5:httpclient5:5.3.1")
 
-    // (Gmail API deps moved to the Poller service — the Processor is Gmail-free.)
+    // Gmail API
+    implementation("com.google.api-client:google-api-client:2.2.0")
+    implementation("com.google.apis:google-api-services-gmail:v1-rev20250331-2.0.0")
+    implementation("com.google.auth:google-auth-library-oauth2-http:1.35.0")
 
     // PDF Generation
     implementation("org.apache.pdfbox:pdfbox:3.0.1")
@@ -32,15 +35,15 @@ dependencies {
     // HTML Parsing
     implementation("org.jsoup:jsoup:1.17.2")
 
+    // Jakarta Mail for Gmail
+    implementation("com.sun.mail:javax.mail:1.6.2")
+
     // Playwright for PDF rendering and LinkedIn scraping.
     // driver-bundle includes the Playwright CLI and browser binaries (~150 MB).
     implementation("com.microsoft.playwright:playwright:1.42.0")
 
     // Configuration
     implementation("io.github.cdimascio:dotenv-java:3.0.2")
-
-    // Postgres JDBC driver (direct-Postgres gateway)
-    implementation("org.postgresql:postgresql:42.7.4")
 
     // CLI
     implementation("info.picocli:picocli:4.7.5")

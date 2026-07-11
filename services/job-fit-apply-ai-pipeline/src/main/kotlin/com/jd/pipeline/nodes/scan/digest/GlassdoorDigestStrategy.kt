@@ -68,28 +68,12 @@ object GlassdoorDigestStrategy : BoardDigestStrategy {
     private data class ParsedGlassdoorCard(val company: String, val roleTitle: String, val location: String, val salaryRange: String)
 
     private fun parseGlassdoorHtmlCard(anchorHtml: org.jsoup.nodes.Element): ParsedGlassdoorCard? {
-        fun textsOf(tag: String) = anchorHtml.select(tag)
-            .map { it.text().replace(Regex("\\s+"), " ").trim() }
-            .filter { it.isNotBlank() }
-        val pTexts = textsOf("p")
-        // Current Glassdoor job-alert emails render the company name in a <span>
-        // (role/location/salary stay in <p> tags). Older formats put the company
-        // in the first <p>, so fall back to that when no usable <span> exists.
-        val spanTexts = textsOf("span")
-
-        fun isCardMeta(t: String) = isGlassdoorRating(t) || isGlassdoorLocation(t) ||
-            isGlassdoorSalary(t) || isGlassdoorBadge(t) || isGlassdoorAge(t)
-
-        // The company <span> often flattens an inline rating into its text, e.g.
-        // "Blue Origin 3.3 ★" — strip the trailing "<n.n> ★" to get a clean name.
-        val rawCompany = spanTexts.firstOrNull { !isCardMeta(it) }
-            ?: pTexts.firstOrNull { !isCardMeta(it) }
-            ?: return null
-        val company = rawCompany.replace(Regex("\\s*\\d+(?:\\.\\d+)?\\s*★\\s*$"), "").trim()
-            .ifBlank { return null }
-        val roleTitle = pTexts.firstOrNull { it != rawCompany && it != company && !isCardMeta(it) } ?: return null
-        val location = pTexts.firstOrNull(::isGlassdoorLocation) ?: return null
-        val salary = pTexts.firstOrNull(::isGlassdoorSalary).orEmpty()
+        val texts = anchorHtml.select("p").map { it.text().replace(Regex("\\s+"), " ").trim() }.filter { it.isNotBlank() }
+        if (texts.isEmpty()) return null
+        val company = texts.firstOrNull { !isGlassdoorRating(it) } ?: return null
+        val roleTitle = texts.firstOrNull { it != company && !isGlassdoorRating(it) && !isGlassdoorLocation(it) && !isGlassdoorSalary(it) && !isGlassdoorBadge(it) && !isGlassdoorAge(it) } ?: return null
+        val location = texts.firstOrNull(::isGlassdoorLocation) ?: return null
+        val salary = texts.firstOrNull(::isGlassdoorSalary).orEmpty()
         return ParsedGlassdoorCard(company, roleTitle, location, salary)
     }
 
@@ -113,12 +97,9 @@ object GlassdoorDigestStrategy : BoardDigestStrategy {
 
     private fun isGlassdoorRating(text: String) = text.matches(Regex("\\d+(?:\\.\\d+)?\\s*★"))
     private fun isGlassdoorLocation(text: String) = text.matches(Regex("[A-Z][A-Za-z .'-]+,\\s*[A-Z]{2}"))
-    // Salary text looks like "$129K - $175K ( Employer est. )" — note the space
-    // before the closing paren in current emails, so match "est." not "est.)".
-    private fun isGlassdoorSalary(text: String) = text.contains('$') && text.contains("est.")
+    private fun isGlassdoorSalary(text: String) = text.contains('$') && text.contains("est.)")
     private fun isGlassdoorBadge(text: String) = text.equals("Best Place to Work", ignoreCase = true)
-    private fun isGlassdoorAge(text: String) =
-        text.matches(Regex("\\d+[dhwm]")) || text.equals("Just posted", ignoreCase = true)
+    private fun isGlassdoorAge(text: String) = text.matches(Regex("\\d+[dhwm]"))
 
     private fun buildGlassdoorSummary(card: ParsedGlassdoorCard, url: String): String = buildString {
         append(card.roleTitle).append(" at ").append(card.company).append(". ")

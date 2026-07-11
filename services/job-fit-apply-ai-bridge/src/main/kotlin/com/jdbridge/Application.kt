@@ -18,27 +18,15 @@ private val log = LoggerFactory.getLogger("com.jdbridge.Application")
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/**
- * Connector bind hosts for the given resolved host.
- *   "0.0.0.0"  → one wildcard connector (already covers loopback; adding 127.0.0.1 too
- *                would double-bind the port and fail to start) — container mode.
- *   null/blank → loopback only.
- *   otherwise  → loopback + the resolved host (e.g. the Tailscale IP) — host mode.
- */
-fun resolveBindHosts(resolvedHost: String?): List<String> =
-    if (resolvedHost == "0.0.0.0") {
-        listOf("0.0.0.0")
-    } else buildList {
-        add("127.0.0.1")
-        if (resolvedHost != null && resolvedHost != "127.0.0.1") add(resolvedHost)
-    }
-
 fun main() {
     loadDotEnv()
     val tailscaleHost = resolveTailscaleHost(getEnv("JD_BRIDGE_HOST", "__tailscale__"))
     val port = getEnv("JD_BRIDGE_PORT", "8765").toIntOrNull() ?: 8765
 
-    val hosts = resolveBindHosts(tailscaleHost)
+    val hosts = buildList {
+        add("127.0.0.1")
+        if (tailscaleHost != null && tailscaleHost != "127.0.0.1") add(tailscaleHost)
+    }
     log.info("jd-bridge binding to ${hosts.joinToString(", ")} on port $port")
 
     val env = applicationEngineEnvironment {
@@ -58,11 +46,6 @@ fun Application.configureApplication() {
         json(Json {
             explicitNulls  = false
             encodeDefaults = true
-            // Tolerate result/record fields the worker adds over time (e.g. artifact_url).
-            // Without this, any new ProcessingResult field 400s every postResult and stalls
-            // the queue (jobs stuck in "claimed"). The bridge must not be coupled to the
-            // worker's exact result schema.
-            ignoreUnknownKeys = true
         })
     }
 

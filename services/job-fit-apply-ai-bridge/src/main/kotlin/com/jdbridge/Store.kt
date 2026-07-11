@@ -11,22 +11,13 @@ import org.slf4j.LoggerFactory
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
 
 private val log = LoggerFactory.getLogger("com.jdbridge.Store")
 
-// ── Configurable store root (JD_BRIDGE_STORE_DIR; overridden in tests) ─────────
+// ── Configurable store root (override in tests) ───────────────────────────────
 
-/**
- * The store root: [envValue] (JD_BRIDGE_STORE_DIR) when set — a mounted volume like
- * /data in a container — otherwise ~/.openclaw/jd-bridge on the host. Blank → default.
- */
-fun resolveStoreDir(envValue: String?): Path =
-    envValue?.takeIf { it.isNotBlank() }?.let { Paths.get(it) }
-        ?: Paths.get(System.getProperty("user.home"), ".openclaw", "jd-bridge")
-
-var STORE_DIR: Path = resolveStoreDir(System.getenv("JD_BRIDGE_STORE_DIR"))
+var STORE_DIR: Path = Paths.get(System.getProperty("user.home"), ".openclaw", "jd-bridge")
     set(value) {
         field = value
         _database = null  // force re-init when path changes
@@ -44,39 +35,21 @@ private val STALE_CLAIM_MILLIS = 30L * 60 * 1000   // 30 minutes
 
 private var _database: Database? = null
 
-// Monotonic write-back cursor. In-process AtomicLong (the bridge is single-process) →
-// concurrency-safe and O(1), unlike an in-transaction MAX+1 read-modify-write. Seeded from
-// the DB max in initDb() so it survives restarts.
-private val completedSeqCounter = AtomicLong(0)
-
 // ── Exposed table definition ──────────────────────────────────────────────────
 
 internal object Jobs : Table("jobs") {
     val id              = text("id")
     val status          = text("status").default("pending")
-    val type            = text("type").default(WorkItemType.JD_SCRAPED)
     val jdJson          = text("jd_json").nullable()
     val jobUrl          = text("job_url").nullable()
     val idempotencyKey  = text("idempotency_key").nullable()
     val fitScore        = integer("fit_score").nullable()
     val pipelineAction  = text("pipeline_action").nullable()
     val artifactsJson   = text("artifacts_json").nullable()
-    // Processed-posting identity (from the result) — for completed-feed event-stream consumers.
-    val company         = text("company").nullable()
-    val roleTitle       = text("role_title").nullable()
-    val artifactUrl     = text("artifact_url").nullable()   // markserv report URL
     val error           = text("error").nullable()
     val claimedAt       = long("claimed_at").nullable()
     val createdAt       = long("created_at")
     val updatedAt       = long("updated_at")
-
-    // Gmail write-back (set when the job goes terminal; drained by the Poller).
-    val terminalLabel   = text("terminal_label").nullable()
-    val draftText       = text("draft_text").nullable()
-    val isRecruiter     = bool("is_recruiter").default(false)
-    val messageId       = text("message_id").nullable()
-    val writebackDone   = bool("writeback_done").default(false)
-    val completedSeq    = long("completed_seq").nullable()   // monotonic; assigned on terminal
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -99,17 +72,8 @@ suspend fun initDb() = withContext(Dispatchers.IO) {
     )
     transaction(_database!!) {
         SchemaUtils.createMissingTablesAndColumns(Jobs)
-        // Seed the write-back cursor from the persisted max (DESC → highest non-null first).
-        // updateAndGet(maxOf) — never lower the counter, so a re-init (configureApplication
-        // fires initDb again async on ApplicationStarted) can't reset it backward and re-issue
-        // an already-used seq.
-        val maxSeq = Jobs.selectAll()
-            .orderBy(Jobs.completedSeq, SortOrder.DESC)
-            .limit(1)
-            .firstOrNull()?.get(Jobs.completedSeq) ?: 0L
-        completedSeqCounter.updateAndGet { maxOf(it, maxSeq) }
     }
-    log.info("Store initialised at $DB_PATH (completed_seq cursor at ${completedSeqCounter.get()})")
+    log.info("Store initialised at $DB_PATH")
 }
 
 // ── Queue operations ──────────────────────────────────────────────────────────
@@ -140,26 +104,18 @@ suspend fun findActiveDuplicate(jobUrl: String?, key: String?): String? = dbQuer
 }
 
 /**
- * Insert a new PENDING row and return its id. [type] discriminates the payload for the Processor.
+ * Insert a new PENDING row and return its id.
  */
-suspend fun enqueue(
-    jdJson: String,
-    jobUrl: String?,
-    idempotencyKey: String?,
-    type: String = WorkItemType.JD_SCRAPED,
-    messageId: String? = null,
-): String {
+suspend fun enqueue(jdJson: String, jobUrl: String?, idempotencyKey: String?): String {
     val jobId = UUID.randomUUID().toString()
     val now = System.currentTimeMillis() / 1000L
     dbQuery {
         Jobs.insert {
             it[Jobs.id]             = jobId
             it[Jobs.status]         = JobStatus.PENDING.value
-            it[Jobs.type]           = type
             it[Jobs.jdJson]         = jdJson
             it[Jobs.jobUrl]         = jobUrl
             it[Jobs.idempotencyKey] = idempotencyKey
-            it[Jobs.messageId]      = messageId
             it[Jobs.createdAt]      = now
             it[Jobs.updatedAt]      = now
         }
@@ -196,7 +152,7 @@ suspend fun claimNext(): ClaimedJob? = dbQuery {
     }
 
     val jdJson = row[Jobs.jdJson] ?: return@dbQuery null
-    ClaimedJob(id = jobId, type = row[Jobs.type], jdJson = jdJson)
+    ClaimedJob(id = jobId, jdJson = jdJson)
 }
 
 /**
@@ -205,82 +161,16 @@ suspend fun claimNext(): ClaimedJob? = dbQuery {
 suspend fun recordResult(jobId: String, req: ResultRequest) {
     val now = System.currentTimeMillis() / 1000L
     val newStatus = if (req.error != null) JobStatus.ERROR else JobStatus.DONE
-    // Concurrency-safe monotonic cursor (survives Phase-2 parallel Processors).
-    val nextSeq = completedSeqCounter.incrementAndGet()
     dbQuery {
         Jobs.update({ Jobs.id eq jobId }) { row ->
             row[Jobs.status]          = newStatus.value
             row[Jobs.fitScore]        = req.fit_score
             row[Jobs.pipelineAction]  = req.pipeline_action
             req.error?.let { row[Jobs.error] = it }
-            // Processed-posting identity + report URL (for completed-feed consumers). job_url may
-            // have been null at enqueue (EMAIL_RAW) — the result carries the scraped value.
-            req.company?.let { row[Jobs.company] = it }
-            req.role_title?.let { row[Jobs.roleTitle] = it }
-            req.job_url?.let { row[Jobs.jobUrl] = it }
-            req.artifact_url?.let { row[Jobs.artifactUrl] = it }
             row[Jobs.claimedAt]       = null
             row[Jobs.updatedAt]       = now
-            // Gmail write-back payload
-            row[Jobs.terminalLabel]   = req.terminal_label
-            row[Jobs.draftText]       = req.draft_text
-            row[Jobs.isRecruiter]     = req.is_recruiter
-            req.message_id?.let { row[Jobs.messageId] = it }
-            row[Jobs.writebackDone]   = false
-            row[Jobs.completedSeq]    = nextSeq
         }
     }
-}
-
-/**
- * Completed jobs the Poller still needs to write back to Gmail: terminal status,
- * not yet acknowledged, with completed_seq > [since]. Oldest first.
- */
-// [all] = false → the Poller's work queue (writeback_done = false). [all] = true → the full event
-// stream (every completed job by completed_seq > since, regardless of write-back) for consumers
-// like the Notifier that track their own cursor.
-suspend fun completedJobs(since: Long, limit: Int = 50, all: Boolean = false): List<CompletedJob> = dbQuery {
-    Jobs.selectAll()
-        .where {
-            val terminal = (Jobs.status inList listOf(JobStatus.DONE.value, JobStatus.ERROR.value)) and
-                (Jobs.completedSeq greater since)
-            if (all) terminal else terminal and (Jobs.writebackDone eq false)
-        }
-        .orderBy(Jobs.completedSeq, SortOrder.ASC)
-        .limit(limit)
-        .map { row ->
-            val artifacts = row[Jobs.artifactsJson]?.let {
-                runCatching { Json.decodeFromString<ArtifactUrls>(it) }.getOrNull()
-            }
-            CompletedJob(
-                job_id          = row[Jobs.id],
-                completed_seq   = row[Jobs.completedSeq] ?: 0L,
-                status          = row[Jobs.status],
-                message_id      = row[Jobs.messageId],
-                terminal_label  = row[Jobs.terminalLabel],
-                draft_text      = row[Jobs.draftText],
-                is_recruiter    = row[Jobs.isRecruiter],
-                artifacts       = artifacts,
-                error           = row[Jobs.error],
-                company         = row[Jobs.company],
-                role_title      = row[Jobs.roleTitle],
-                fit_score       = row[Jobs.fitScore],
-                pipeline_action = row[Jobs.pipelineAction],
-                job_url         = row[Jobs.jobUrl],
-                artifact_url    = row[Jobs.artifactUrl],
-            )
-        }
-}
-
-/** The current max completed_seq — a cursor consumer seeds here on cold start to skip history. */
-fun latestCompletedSeq(): Long = completedSeqCounter.get()
-
-/** Mark a completed job as written back to Gmail (drops it from the feed). */
-suspend fun markWritebackDone(jobId: String): Boolean = dbQuery {
-    Jobs.update({ Jobs.id eq jobId }) {
-        it[Jobs.writebackDone] = true
-        it[Jobs.updatedAt]     = System.currentTimeMillis() / 1000L
-    } > 0
 }
 
 /**
@@ -320,7 +210,6 @@ private fun ResultRow.toJobRow(): JobRow {
     return JobRow(
         id             = this[Jobs.id],
         status         = this[Jobs.status],
-        type           = this[Jobs.type],
         jdJson         = this[Jobs.jdJson],
         jobUrl         = this[Jobs.jobUrl],
         fitScore       = this[Jobs.fitScore],
@@ -330,11 +219,5 @@ private fun ResultRow.toJobRow(): JobRow {
         claimedAt      = this[Jobs.claimedAt],
         createdAt      = this[Jobs.createdAt],
         updatedAt      = this[Jobs.updatedAt],
-        terminalLabel  = this[Jobs.terminalLabel],
-        draftText      = this[Jobs.draftText],
-        isRecruiter    = this[Jobs.isRecruiter],
-        messageId      = this[Jobs.messageId],
-        writebackDone  = this[Jobs.writebackDone],
-        completedSeq   = this[Jobs.completedSeq],
     )
 }
