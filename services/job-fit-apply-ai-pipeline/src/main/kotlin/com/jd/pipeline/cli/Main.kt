@@ -65,8 +65,9 @@ object Main {
               --scrapetuner [file]     Tune the JD scraper
               --signed-in              Report signed-in scraping status
               --test, --test-resume, --test-coverletter, --test-supabase, --test-chrome [url], --test-steel [url]
-              --steel-signin [url]     Open a Steel session, print the phone debug URL, capture cookies on ENTER
-                                       (run with `docker exec -it jobfit-processor …`)
+              --steel-signin [site]    Open a Steel session parked on <site>'s login page, print the phone
+                                       debug URL, and capture cookies automatically until you're signed in.
+                                       Accepts a site name (linkedin), a host, or a full URL. No TTY needed.
               --notify-timeout <min>   Send a pipeline-timeout alert
 
             Note: email intake, drafts, and Gmail labeling are handled by the Poller service.

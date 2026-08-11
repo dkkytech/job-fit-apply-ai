@@ -73,6 +73,9 @@ class IngestionPipeline {
         seniorityLevel = state.seniorityLevel.ifBlank { null },
         yoeRequired    = state.yoeRequired,
         techStack      = state.techStack.ifEmpty { null },
+        // Scraping happens here, in ingestion; the run_log is written from the processing result.
+        // Dropping this was why every job logged an empty scrapePath.
+        scrapePath     = state.scrapePath,
     )
 
     fun resetBatch() = scrapeNode.resetBatch()

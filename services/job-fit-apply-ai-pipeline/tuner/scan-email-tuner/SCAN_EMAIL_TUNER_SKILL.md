@@ -8,7 +8,7 @@ Instructions:
 2. Each tuner file’s first line is the email subject. The remaining content is the expected visible job data from Gmail.
 3. For each tuner file, run:
    ./gradlew run --args='--scantuner <absolute-file-path>'
-4. Review the generated output under /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/output/scan_tuner/.
+4. Review the generated output under `${JFAA_DATA_ROOT}/pipeline-output/scan_tuner/` (resolve with `scripts/jfaa-data-root.sh`; see docs/data-root-migration.md).
 5. Compare the extracted results against the expected visible data in the tuner file.
 6. Update /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/src/main/kotlin/com/jd/pipeline/nodes/ScanEmailNode.kt to improve board-specific parsing and organize the logic by domain/job board.
 7. Update /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/src/main/resources/skills/SCAN_SKILL.md to improve direct-email extraction behavior where appropriate.

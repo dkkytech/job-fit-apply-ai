@@ -1,8 +1,11 @@
 # Phase 2 — containerize the Poller (retire it from PM2)
 
 > **Status: DEPLOYED (2026-07-04).** `jobfit-poller` runs as a Compose service (browser-free image,
-> `--health` healthcheck, `/secrets` volume at `${HOME}/.openclaw/jd-poller-secrets`), reaching the
+> `--health` healthcheck, `/secrets` volume managed by the current `JFAA_DATA_ROOT` Compose setting), reaching the
 > bridge at `http://bridge:8765`. `jd-poller` removed from PM2 (`pm2 save`d). Processor stays on PM2.
+>
+> **Current data-root note:** this historical phase record predates the portable data-root refactor.
+> Use `docs/data-root-migration.md` and the current `docker-compose.yml` as the deployment source of truth.
 
 **Goal:** move `jd-poller` off PM2 into a Docker Compose service (`poller`). The Processor stays on
 the host under PM2 — it needs Chrome/CDP, oMLX, and Ollama, which are host daemons. This retires
@@ -47,7 +50,7 @@ poller:
     GMAIL_TOKEN_FILE: "/secrets/tokens/gmail_token.json"
     GMAIL_MAX_EMAILS: "10"
   volumes:
-    - "${JD_POLLER_SECRETS_HOST:-${HOME}/.openclaw/jd-poller-secrets}:/secrets"
+    - "${JD_POLLER_SECRETS_HOST:-${JFAA_DATA_ROOT:-${HOME}/.local/share/jfaa}/poller-secrets}:/secrets"
   command: ["--poll"]
 ```
 

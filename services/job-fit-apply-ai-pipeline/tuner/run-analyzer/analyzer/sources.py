@@ -13,6 +13,42 @@ nothing downstream changes when the spine switched from run_log to the bridge fe
 import json
 from pathlib import Path
 
+# A digest-derived JD shorter than this was scored on a summary, not a real posting.
+THIN_JD_CHARS = 400
+
+
+def is_thin_digest(rec):
+    """True when [rec] is a digest CHILD whose JD is too thin to be a real posting.
+
+    Excludes digest parents. A parent exists only to fan its children out as their own jobs; its
+    jdText is the digest summary (or empty) by construction, so counting it would report a thin-JD
+    problem for every digest email received.
+
+    `pipelineRan` is what separates them: a parent goes terminal during the processor's scan/scrape
+    resolve and never reaches ProcessingPipeline, while a child is re-enqueued as its own job and
+    does. Nothing else in the record distinguishes them —
+
+      * the terminal label does not: a child inherits the parent's `isDigest` intake and
+        TerminalLabel.forState checks isDigest first, so BOTH read JD_Processed_Digest;
+      * `hasJobUrl` does not: a single-job digest copies the child's URL onto the parent
+        (DigestParseHelpers.applyDigestSummary);
+      * the action/score shape does not: score_fit now SKIPs a stub JD at score 0, which is exactly
+        the parent's shape too.
+
+    So a line without `pipelineRan` (written before this field existed) falls back to a non-zero
+    score — the one unambiguous proof it reached score_fit — and under-reports rather than raising a
+    spurious per-board finding that could reach the autofix loop.
+    """
+    if not rec.get("isDigest"):
+        return False
+    if (rec.get("jdTextLen", 0) or 0) >= THIN_JD_CHARS:
+        return False
+    pipeline_ran = rec.get("pipelineRan")
+    if pipeline_ran is not None:
+        return bool(pipeline_ran)
+    # Legacy line: a non-zero score is the only proof it reached score_fit as a child.
+    return (rec.get("score", 0) or 0) > 0
+
 
 def load_run_log(path: Path):
     """run_log.jsonl -> {jobId: last record}. Best-effort; skips malformed lines."""
@@ -52,7 +88,9 @@ def join_window(completed, run_log_by_id):
             "completed_seq": c.get("completed_seq"),
             "ts": r.get("ts"),
             "status": c.get("status"),               # done | error (bridge terminal)
-            "terminal_label": c.get("terminal_label"),
+            # Bridge feed first; the run_log copy (the processor's own decision) backfills a job
+            # whose bridge row never got one, so is_thin_digest can still tell parent from child.
+            "terminal_label": c.get("terminal_label") or r.get("terminalLabel"),
             "message_id": c.get("message_id"),
             "job_url": job_url,
             "artifact_url": c.get("artifact_url"),
@@ -63,6 +101,8 @@ def join_window(completed, run_log_by_id):
             "board": r.get("board"),                 # run_log only (derived)
             # classification
             "isDigest": bool(r.get("isDigest", False)),
+            # None when the run_log line predates the field — is_thin_digest falls back on that.
+            "pipelineRan": r.get("pipelineRan"),
             "isRecruiter": bool(c.get("is_recruiter", r.get("isRecruiter", False))),
             "isDuplicate": bool(r.get("isDuplicate", False)),
             # outcome

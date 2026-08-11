@@ -162,15 +162,35 @@ fun Routing.configureRoutes() {
         }
 
         log.info("Claimed job: ${claimed.id} (${claimed.type})")
-        call.respond(ClaimResponse(job_id = claimed.id, type = claimed.type, jd_record = jdRecordElement))
+        call.respond(
+            ClaimResponse(
+                job_id = claimed.id,
+                type = claimed.type,
+                jd_record = jdRecordElement,
+                claim_token = claimed.claimToken,
+            ),
+        )
     }
 
     post("/api/jobs/{job_id}/result") {
         val jobId = call.parameters["job_id"]!!
         val req = call.receive<ResultRequest>()
-        recordResult(jobId, req)
-        log.info("Result recorded for $jobId: ${req.pipeline_action}, score=${req.fit_score}, error=${req.error}")
-        call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
+        when (recordResult(jobId, req)) {
+            ResultOutcome.RECORDED -> {
+                log.info("Result recorded for $jobId: ${req.pipeline_action}, score=${req.fit_score}, error=${req.error}")
+                call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
+            }
+            // 200, not an error: a duplicate POST is a worker retrying a lost response, and the
+            // desired end state (one terminal result, one completed event) already holds.
+            ResultOutcome.ALREADY_TERMINAL ->
+                call.respond(HttpStatusCode.OK, mapOf("status" to "already_recorded"))
+            // 409: this worker was displaced. Loud, so a stale worker's logs say why.
+            ResultOutcome.STALE_CLAIM ->
+                call.respond(
+                    HttpStatusCode.Conflict,
+                    ErrorResponse("stale claim token for $jobId — the claim was requeued and re-claimed"),
+                )
+        }
     }
 
     post("/api/jobs/{job_id}/artifacts") {

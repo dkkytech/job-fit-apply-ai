@@ -21,6 +21,18 @@ data class JdRecord(
     val seniorityLevel: String? = null,
     val yoeRequired: Int? = null,
     val techStack: List<String>? = null,
+    /**
+     * How this record's JD text was obtained, carried from ingestion (where the scrape actually
+     * happens) into processing so it reaches the run_log. Without it the analyzer sees "" for every
+     * job and browser-scraping health is invisible — see [ProcessingResult.scrapePath].
+     *
+     * `@get:JsonIgnore` because the EMAIL_RAW path hands this record straight to
+     * [com.jd.pipeline.pipeline.ProcessingPipeline] in-process, so it needs no serialization; keeping
+     * it out of the JSON leaves the bridge's queue payload contract untouched. The consequence is
+     * that digest children, which DO round-trip through the bridge, arrive with "" — correct anyway,
+     * since a JD_SCRAPED child carries the digest's text and never scrapes at claim time.
+     */
+    @get:JsonIgnore val scrapePath: String = "",
 )
 
 data class ProcessingResult(

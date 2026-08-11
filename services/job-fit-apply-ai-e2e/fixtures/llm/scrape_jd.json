@@ -1,0 +1,14 @@
+{
+  "role_title": "{{ROLE}}",
+  "company": "{{COMPANY}}",
+  "location": "Remote (US)",
+  "remote_policy": "remote",
+  "salary_range": "$190,000-$235,000",
+  "employment_type": "full-time",
+  "seniority_level": "principal",
+  "yoe_required": 8,
+  "tech_stack": ["Kotlin", "Playwright", "Appium", "Docker", "PostgreSQL", "OpenTelemetry"],
+  "benefits": ["Health insurance", "Remote stipend"],
+  "company_description": "A deterministic E2E fixture company.",
+  "jd_text": "PAGE_CAPTURE_JD_MARKER {{COMPANY}} is hiring a {{ROLE}} to own quality-platform architecture across mobile, web, and backend services. The engineer will build Kotlin automation, Appium and Playwright frameworks, contract and API tests, CI/CD paved roads, containerized test environments, and OpenTelemetry observability. Responsibilities include reliability engineering, test-data systems, release qualification, developer enablement, and measurable improvements to feedback speed. Candidates need eight years of experience leading test infrastructure for distributed engineering organizations."
+}

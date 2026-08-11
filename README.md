@@ -102,7 +102,7 @@ flowchart TB
 | Steel Browser (scraping) | `jobfit-steel` | `${STEEL_BIND_ADDR:-127.0.0.1}:3000` | `http://<tailscale-name>:3000` (debug UI) |
 
 **Browser scraping backend.** The Processor drives a browser only for LinkedIn, forced-CDP domains (e.g. Glassdoor), and as a fallback when plain-HTTP is blocked. Two backends, selected by `STEEL_BASE_URL`:
-- **Steel Browser** (`jobfit-steel`, default when `STEEL_BASE_URL=http://steel:3000`) — self-hosted [Steel](https://github.com/steel-dev/steel-browser), built from source (the prebuilt images can't launch Chrome on Apple Silicon under Docker). It manages Chrome, persists the logged-in session (app-side `storageState` store), and exposes an **interactive debug URL** so you can re-auth from a phone over Tailscale. The Processor connects over the Compose network, resolving `steel` to an IP (Chrome DevTools rejects non-IP `Host` headers). Sign in once via `http://<tailscale-name>:3000` (no auth on the UI — tailnet only).
+- **Steel Browser** (`jobfit-steel`, default when `STEEL_BASE_URL=http://steel:3000`) — self-hosted [Steel](https://github.com/steel-dev/steel-browser), built from source (the prebuilt images can't launch Chrome on Apple Silicon under Docker). It manages Chrome, persists the logged-in session (app-side `storageState` store), and exposes an **interactive debug URL** so you can re-auth from a phone over Tailscale. The Processor connects over the Compose network, resolving `steel` to an IP (Chrome DevTools rejects non-IP `Host` headers). Sign in once via `http://<tailscale-name>:3000` (no auth on the UI — tailnet only). When a board later drops its session, the re-auth alert links to the **tap-to-sign-in endpoint** (`STEEL_SIGNIN_PUBLIC_URL`, port 3100 on the Processor) rather than at the live scrape session — that session is released at batch close, so its debug link is dead by the time you read the alert. Tapping creates a 30-min session, parks it on the board's login page, and merges cookies every 10s until you're in (see the pipeline README). Steel can **wedge** (`createSession` → HTTP 500) while its API still answers `200`: Chrome runs unreaped under a shell PID 1, so a crash leaves a stale `SingletonLock` (its PID still "alive" as a zombie) and Chrome then refuses to relaunch. The Compose service runs `init: true` to reap those children (freeing the PID so Chrome clears the lock) and wipes any leftover `SingletonLock` on start; the healthcheck probes real session creation so any remaining wedge shows as unhealthy, and the optional `com.jd.steel-watchdog` launch agent auto-restarts it as a last resort (see the pipeline README).
 - **Host Chrome/CDP** (`:9222`, fallback when `STEEL_BASE_URL` is blank) — a logged-in Chrome on the host reached via `host.docker.internal` (the entrypoint resolves it to an IP for the same Host-header reason).
 
 **On the host:** the local model servers (oMLX `:11436`, Ollama `:11434`) remain, plus the host Chrome/CDP (`:9222`) if used as the fallback backend. Every pipeline service — including the Processor — is a container: `jobfit-processor` reaches the bridge over the Compose network (`http://bridge:8765`) and dials the host model servers via `host.docker.internal`. Gmail intake + write-back runs in `jobfit-poller`; the Processor never touches Gmail.
@@ -238,6 +238,15 @@ The containers and worker must be up before the cron jobs fire — run `make doc
 | `make serve` | (Re)configure Tailscale Serve only |
 | `make doctor` | Read-only health check of the whole stack |
 | `make logs` | Tail container logs |
+| `make e2e` | Full black-box E2E cycle on an isolated compose slice (up + run + down) |
+| `make e2e-up` / `e2e-run` / `e2e-down` | Same, split — `e2e-run` is the fast ad-hoc loop |
+| `make e2e-multi` | Dual-slice E2E: adds a prod-shaped "source" slice + the multi-instance scenarios |
+| `make e2e-logs` | Tail the e2e slice's container logs |
+| `make e2e-smoke` | Legacy full-fat smoke against the REAL stack + real local models |
+| `make replay ARGS="--last 1"` | Replay prod bridge jobs into the test instance (`scripts/replay-jobs.sh`) |
+
+Every stack-facing target takes `INSTANCE=<name>` (default `prod`) — e.g. `make up INSTANCE=test`
+drives a second, fully isolated stack from `.env.test`. See [docs/multi-instance.md](docs/multi-instance.md).
 
 ---
 
@@ -363,7 +372,7 @@ output/
     └── ats_score.txt                 # ATS composite scorecard
 ```
 
-The pipeline writes into `services/job-fit-apply-ai-pipeline/output/`, which is bind-mounted read-only into `jobfit-markserv` and rendered at `http://<tailscale-name>:8081/<job-dir>/report.md`. Browser-triggered jobs also expose artifacts via the bridge at `GET /api/jobs/{id}/resume.pdf` and `/cover_letter.txt`.
+The pipeline writes into `${JFAA_DATA_ROOT}/pipeline-output/` on the host (the Processor's `/app/output`; see [docs/data-root-migration.md](docs/data-root-migration.md)), which is bind-mounted read-only into `jobfit-markserv` and rendered at `http://<tailscale-name>:8081/<job-dir>/report.md`. Browser-triggered jobs also expose artifacts via the bridge at `GET /api/jobs/{id}/resume.pdf` and `/cover_letter.txt`.
 
 ---
 
@@ -385,9 +394,39 @@ cd apps/job-fit-apply-ai-backlog && npm run test:e2e
 # Extension
 cd apps/job-fit-apply-ai-extension && npm test
 
+# Black-box E2E: Bridge → Processor → Notifier on an isolated compose slice
+make e2e
+
 # Whole-stack health (read-only)
 make doctor
 ```
+
+### Black-box E2E (`services/job-fit-apply-ai-e2e`)
+
+`make e2e` runs a scenario-based black-box suite through the Bridge and asserts the whole
+chain — bridge status, rendered artifacts, markserv, `tracks`, `/api/tracks`, the completed
+feed, and Discord/Telegram payloads — against a **fake LLM** in the test JVM. Besides the
+pre-scraped happy path, deterministic scenarios cover low-fit SKIP, one ATS refinement pass,
+captured-page intake through `/api/pages`, and direct recruiter-email intake through
+`/api/emails` (including draft-reply composition). This pins exact values and branch behavior,
+not merely "a file exists". Design doc: [`docs/e2e-testing-plan.md`](docs/e2e-testing-plan.md).
+
+It runs in its own compose project (`jobfit-e2e-<checkout hash>`, alternate ports, state
+in a gitignored `./.e2e/`), so it is safe to run while the production stack is up. Two
+things worth knowing:
+
+- **`E2E_FAKE_LLM_PORT` defaults to 21436, not 11436.** 11436 is production oMLX. Binding
+  both is possible but the more-specific socket wins, so sharing the port makes the e2e
+  run silently hit real models — or, with oMLX down, makes the fake answer the *production*
+  processor with fixture data. `REAL_LLM=1` selects 11436 on purpose and skips the fake.
+- **Tier A vs Tier B.** The happy path is one scenario-level test with grouped checks, so
+  submission, waiting, and verification are included in its reported duration. Tier A is
+  structural and also holds against a real model; Tier B pins exact values (`fit_score`,
+  the LLM call sequence, canned content) and catches a *silently degraded* run. The four
+  deterministic branch/intake scenarios are tagged `tier-b` because their contracts depend
+  on planned fake responses. `-PexcludeTags=tier-b` therefore runs structural HappyPath only,
+  and `REAL_LLM=1` passes it. Belt and braces: those scenarios also skip themselves under
+  `E2E_REAL_LLM=1`, since a bare `./gradlew test` (what CI runs) never sees the property.
 
 DB-backed tests (`PostgresGatewayLiveTest`, `TracksApiTest`) connect over TCP to the running `jobfit-db` container and **skip automatically** when it isn't up, so they're CI-safe. `TracksApiTest` self-provisions an isolated `jobfit_test` database so it never touches real data.
 

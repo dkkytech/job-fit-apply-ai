@@ -1,0 +1,9 @@
+{
+  "grouped_by_category": {
+    "Mobile Test Automation": ["Espresso", "XCUITest", "Kotlin"],
+    "CI & Test Infrastructure": ["GitHub Actions", "Bitrise", "Firebase Test Lab"],
+    "Observability": ["Datadog", "Grafana"]
+  },
+  "jd_matched_skills": ["Espresso", "XCUITest", "Kotlin", "GitHub Actions"],
+  "removed_for_this_role": ["Swift", "Appium", "Python"]
+}

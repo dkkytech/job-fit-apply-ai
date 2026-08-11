@@ -10,7 +10,7 @@ Instructions:
    - Copy `template.json` when adding a new dataset file.
 3. For each tuner file, run:
    ./gradlew run --args='--scrapetuner <absolute-file-path> --max-iterations 5'
-4. Review the generated output under /Users/dkkyai/projects/job-fit-apply-ai/services/job-fit-apply-ai-pipeline/output/scrape_tuner/.
+4. Review the generated output under `${JFAA_DATA_ROOT}/pipeline-output/scrape_tuner/` (resolve with `scripts/jfaa-data-root.sh`; see docs/data-root-migration.md).
 5. Compare the scraped jd_text, role_title, company, location, and salary_range against:
    - The expected_jd_text in the dataset file (if populated).
    - The dataset company/role_title/location as a sanity check.

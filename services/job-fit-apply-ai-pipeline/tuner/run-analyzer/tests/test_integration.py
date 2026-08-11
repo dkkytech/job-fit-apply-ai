@@ -4,6 +4,7 @@ Hermetic — a fake bridge and a stubbed model, no network / LLM / live services
 reads required config from the environment at import time, so we set it before importing.
 """
 
+import importlib
 import json
 import os
 import sys
@@ -31,11 +32,24 @@ os.environ.update({
     "RUN_ANALYZER_AUDIT_MAX": "0",   # skip the deep audit (needs files/DB)
     "JD_BRIDGE_URL": "http://fake",
 })
-# Ensure notifications stay a no-op.
-for _k in ("DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+# Ensure notifications stay a no-op, regardless of credentials inherited from the invoking shell.
+for _k in (
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_CHANNEL_ID",
+    "RUN_ANALYZER_TELEGRAM_BOT_TOKEN",
+    "RUN_ANALYZER_TELEGRAM_CHAT_ID",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+):
     os.environ.pop(_k, None)
 
+from analyzer import notify as _notify  # noqa: E402
+importlib.reload(_notify)
 import analyze  # noqa: E402
+analyze = importlib.reload(analyze)
+
+assert analyze.notify.TELEGRAM_TOKEN == "", "integration tests must disable Telegram notifications"
+assert analyze.notify.TELEGRAM_CHAT == "", "integration tests must disable Telegram notifications"
 
 
 def _job(seq):

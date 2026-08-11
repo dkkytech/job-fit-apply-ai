@@ -8,16 +8,22 @@ import org.mockito.kotlin.argThat
 import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
+import org.mockito.kotlin.times
+import org.mockito.kotlin.whenever
 import org.mockito.kotlin.verify
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 @DisplayName("Notifier (message formatting + gating)")
 class NotifierTest {
 
+    // Both channels accept by default; a test that cares about refusal stubs its own result.
     private fun client(discord: Boolean = true, telegram: Boolean = true) = mock<NotificationClient> {
         on { discordConfigured } doReturn discord
         on { telegramConfigured } doReturn telegram
+        on { postDiscord(any()) } doReturn DeliveryResult.DELIVERED
+        on { postTelegramHtml(any()) } doReturn DeliveryResult.DELIVERED
     }
 
     private fun job(
@@ -33,7 +39,7 @@ class NotifierTest {
     @DisplayName("no channels configured → nothing sent")
     fun noChannels() {
         val c = client(discord = false, telegram = false)
-        assertFalse(Notifier(c, fitThreshold = 50).notify(job()))
+        assertFalse(Notifier(c, fitThreshold = 50).notify(job()).sentAnything)
         verify(c, never()).postDiscord(any())
         verify(c, never()).postTelegramHtml(any())
     }
@@ -42,7 +48,9 @@ class NotifierTest {
     @DisplayName("non-job event (no company, no error) is skipped")
     fun nonJobSkipped() {
         val c = client()
-        assertFalse(Notifier(c, 50).notify(job(company = null, role = null, error = null)))
+        val outcome = Notifier(c, 50).notify(job(company = null, role = null, error = null))
+        assertFalse(outcome.sentAnything)
+        assertTrue(outcome.acked, "a non-job event must not hold the cursor")
         verify(c, never()).postDiscord(any())
     }
 
@@ -50,7 +58,7 @@ class NotifierTest {
     @DisplayName("scored job below threshold → Discord only, no Telegram")
     fun belowThreshold() {
         val c = client()
-        assertTrue(Notifier(c, fitThreshold = 50).notify(job(fit = 30, action = "tailor")))
+        assertTrue(Notifier(c, fitThreshold = 50).notify(job(fit = 30, action = "tailor")).sentAnything)
         verify(c).postDiscord(argThat { contains("Acme") && contains("Staff SDET") && contains("30") && contains("tailor") })
         verify(c, never()).postTelegramHtml(any())
     }
@@ -90,5 +98,37 @@ class NotifierTest {
             contains("<a href=\"https://acme.co/j\">Acme</a>") &&
                 contains("<a href=\"http://markserv/x/report.md\">Staff SDET</a>")
         })
+    }
+
+    @Test
+    @DisplayName("a retryable Discord failure is not acked, and the delivered Telegram is not re-sent on retry")
+    fun partialSuccessIsNotAckedAndDoesNotDuplicate() {
+        val c = client()
+        whenever(c.postDiscord(any())).doReturn(DeliveryResult.RETRYABLE)
+        val notifier = Notifier(c, fitThreshold = 50)
+
+        val first = notifier.notify(job(fit = 80))
+        assertFalse(first.acked, "a retryable channel must hold the cursor")
+        assertEquals(setOf("telegram"), first.deliveredChannels())
+
+        // The retry: Discord recovers, and Telegram must not be posted a second time.
+        whenever(c.postDiscord(any())).doReturn(DeliveryResult.DELIVERED)
+        val second = notifier.notify(job(fit = 80), first.deliveredChannels()).merge(first)
+
+        assertTrue(second.acked)
+        verify(c, times(2)).postDiscord(any())
+        verify(c, times(1)).postTelegramHtml(any())
+    }
+
+    @Test
+    @DisplayName("a permanent failure is acked — one bad channel must not block every later event")
+    fun permanentFailureIsAcked() {
+        val c = client()
+        whenever(c.postDiscord(any())).doReturn(DeliveryResult.PERMANENT)
+
+        val outcome = Notifier(c, fitThreshold = 50).notify(job(fit = 30))
+
+        assertFalse(outcome.sentAnything)
+        assertTrue(outcome.acked, "retrying a 4xx forever would turn one misconfiguration into an outage")
     }
 }

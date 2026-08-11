@@ -1,0 +1,36 @@
+# Synthetic e2e candidate profile — committed fixture, NEVER real data.
+# Structure mirrors candidate_profile.template.yaml. `never_claim` terms are
+# force-classified unsupported and leak-checked against the rendered resume, so
+# they must not appear in resume.yaml or any canned llm/ response.
+
+scoring:
+  target_title: "Staff Software Engineer in Test"
+  core_strengths:
+    - "Mobile test automation frameworks (Espresso, XCUITest) built from scratch"
+    - "CI/CD pipeline ownership and device-farm infrastructure at consumer scale"
+
+tailoring:
+  positioning_statement: "Staff-level SDET who builds the mobile test infrastructure other teams standardize on — frameworks, CI/CD pipelines, and device labs."
+  evidence_bank:
+    - "Interviewed and hired 3 SDETs at NovaPay (2022-2024); designed the automation interview loop"
+    - "Reduced the Android PR pipeline from 51 to 24 minutes at NovaPay by sharding Espresso suites (2023)"
+  never_claim:
+    - "Ruby"
+
+preferences:
+  willing_to_relocate: false
+  relocation_notes: "Remote preferred; no relocation."
+  visa_status: "US Citizen"
+  visa_sponsorship_required: false
+  available_to_start_date: "Immediately"
+  notice_period_days: null
+  preferred_work_arrangement: "Remote"
+  current_base_salary: null
+  minimum_total_compensation: "150000"
+  compensation_notes: "Flexible for the right role."
+  open_to_equity_only_roles: false
+  willing_to_travel: false
+  travel_percentage: "<= 10%"
+  open_to_contract_roles: false
+  minimum_contract_rate_hourly: null
+  additional_notes: null

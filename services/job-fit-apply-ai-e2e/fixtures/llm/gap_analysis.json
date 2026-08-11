@@ -1,0 +1,9 @@
+{
+  "supported": [
+    {"term": "Kotlin mobile test automation", "evidence": "Built the Android UI automation framework on Espresso; API regression suite in Kotlin"},
+    {"term": "GitHub Actions pipeline ownership", "evidence": "Firebase Test Lab device matrix wired into GitHub Actions"},
+    {"term": "device farm infrastructure", "evidence": "Stood up a Firebase Test Lab device matrix of 24 configurations"}
+  ],
+  "unsupported": ["Pact", "gRPC"],
+  "missing_but_supported": []
+}

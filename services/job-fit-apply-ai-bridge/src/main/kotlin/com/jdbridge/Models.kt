@@ -108,6 +108,9 @@ data class ResultRequest(
     val draft_text: String?       = null,          // LLM-generated recruiter reply (Processor makes it)
     val is_recruiter: Boolean     = false,
     val message_id: String?       = null,          // present only for EMAIL_RAW jobs
+    // Fencing token handed out by /api/queue/claim. Null from a worker built before fencing
+    // existed; a *stale* one is refused (see Store.recordResult).
+    val claim_token: String?      = null,
 )
 
 // ── Outbound ──────────────────────────────────────────────────────────────────
@@ -124,6 +127,8 @@ data class ClaimResponse(
     val job_id: String,
     val type: String = WorkItemType.JD_SCRAPED,   // Processor branches on this
     val jd_record: JsonElement,                   // raw stored payload (JdRecord or email)
+    /** Present it on POST /result. Rotated per claim, so a requeued claim invalidates it. */
+    val claim_token: String? = null,
 )
 
 /**
@@ -226,4 +231,4 @@ data class JobRow(
 )
 
 /** Returned by claimNext() — enough for the Processor to act on. */
-data class ClaimedJob(val id: String, val type: String, val jdJson: String)
+data class ClaimedJob(val id: String, val type: String, val jdJson: String, val claimToken: String? = null)

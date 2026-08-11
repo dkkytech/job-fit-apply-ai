@@ -80,13 +80,29 @@ class AlertService(private val client: NotificationClient = NotificationClient()
         val msg = buildString {
             append("$site needs sign-in. ")
             if (!linkUrl.isNullOrBlank()) {
-                append("Open the link below on your phone and sign in — the pipeline will reuse the session.")
+                append("Tap the link below on your phone — it opens a browser on the sign-in page. ")
+                append("Cookies are captured automatically; there's nothing to confirm.")
             } else {
                 append("Sign in to the browser session — the pipeline will reuse it.")
             }
             detail?.takeIf { it.isNotBlank() }?.let { append("\n$it") }
         }
         send(Alert(Severity.WARN, "Sign-in required: $site", msg, linkUrl = linkUrl), dedupKey = "reauth:$site")
+    }
+
+    /**
+     * A sign-in landed and its cookies were persisted. Closes the loop opened by [reauthRequired] so
+     * the user knows the tap worked without having to check a log or re-run a scrape. Not de-duped:
+     * each successful sign-in is a distinct event worth confirming.
+     */
+    fun reauthCaptured(site: String, cookies: Int) {
+        send(
+            Alert(
+                Severity.INFO,
+                "Signed in: $site",
+                "Captured $cookies cookies — scraping will reuse this session on the next run.",
+            )
+        )
     }
 
     /** The browser backend (Steel / debug Chrome) could not be reached. */

@@ -196,6 +196,12 @@ class GmailClient(
             for (path in validAttachments) {
                 val attachPart = MimeBodyPart()
                 attachPart.attachFile(File(path))
+                // Override the temp-file name ("poller-artifact-*.pdf") with a clean,
+                // professional name the recruiter will see in their inbox.
+                val file = File(path)
+                if (file.extension.equals("pdf", ignoreCase = true)) {
+                    attachPart.fileName = "RichardHatcherResume.pdf"
+                }
                 multipart.addBodyPart(attachPart)
             }
             mime.setContent(multipart)

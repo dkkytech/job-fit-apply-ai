@@ -1,6 +1,8 @@
 package com.jdbridge
 
 import kotlinx.coroutines.runBlocking
+import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.sql.update
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.nio.file.Files
@@ -84,3 +86,14 @@ suspend fun enqueueAndComplete(
 // ── DB init helper ────────────────────────────────────────────────────────────
 
 fun initTestDb() = runBlocking { initDb() }
+
+/**
+ * Age a claim past the stale window so the next `claimNext()` requeues it.
+ *
+ * Epoch rather than "now minus the window": the window is configurable
+ * (`JD_BRIDGE_STALE_CLAIM_SECONDS`), and a test that hard-codes the default silently stops
+ * exercising the requeue the moment someone tunes it.
+ */
+fun expireClaim(jobId: String) = transaction {
+    Jobs.update({ Jobs.id eq jobId }) { it[Jobs.claimedAt] = 0L }
+}

@@ -87,6 +87,19 @@ class TestCheckOutcomes(unittest.TestCase):
         fl = {"fp1": {"fingerprint": "fp1", "category": "scoring", "status": "resolved"}}
         self.assertEqual(outcomes.check_outcomes(fl, self.autofix, self.hist, k=3)["resolved"], [])
 
+    def test_scraping_finding_is_not_resolved_from_zero_hard_error_rate(self):
+        # Scrape failures may deliberately fall back to email snippets, leaving hard errors at
+        # zero even while the scraper is broken. This category needs a direct scrape-health metric.
+        for ts in RUNS:
+            history.append(self.hist, ts, 0, 1, 5, {"error_rate": 0.0})
+        _write_autofix(self.autofix, "fp1", "pr_merged", MERGED_TS)
+        fl = {"fp1": {"fingerprint": "fp1", "category": "scraping", "status": "active"}}
+
+        self.assertEqual(
+            outcomes.check_outcomes(fl, self.autofix, self.hist, k=3),
+            {"resolved": [], "regressed": []},
+        )
+
 
 class TestReconcileMerges(unittest.TestCase):
     def setUp(self):

@@ -1,0 +1,139 @@
+# E2E override — docker compose -f docker-compose.yml -f docker-compose.e2e.yml
+#
+# Always used together with a COMPOSE_PROJECT_NAME of jobfit-e2e* (the e2e-* Make
+# targets append a hash of the checkout path, so worktrees don't collide): distinct
+# project + container names + host ports + bind-mount sources mean the e2e slice runs
+# alongside the production stack on the same host without touching its containers, its
+# Postgres volume, its bridge store, or the real resume.yaml / candidate_profile.yaml /
+# pipeline .env. Container names track COMPOSE_PROJECT_NAME for the same reason.
+#
+# The e2e slice is: db, bridge, markserv, processor, notifier. Poller and JSearch
+# are disabled by default and their mounts are redirected to ./.e2e so even an
+# explicit profile activation cannot touch production Gmail credentials or state.
+# Frontend/Steel are not started by the e2e targets; `depends_on: !override` on the
+# processor drops the Steel health dependency, and a JD_SCRAPED job never scrapes.
+#
+# Run `scripts/e2e-ci-prepare.sh` first — it creates ${E2E_STATE_DIR:-./.e2e}/* including the
+# pipeline dotenv file (a *file* bind-mount source: if it does not exist Docker
+# silently creates a directory in its place and the app breaks at runtime).
+#
+# E2E_STATE_DIR moves ALL of the slice's bind-mount sources at once (default ./.e2e).
+# The multi-instance acceptance scenarios (#56 sc. 9/10) use it to run a second,
+# "source"-shaped slice from ./.e2e-src under its own COMPOSE_PROJECT_NAME and ports —
+# see `make e2e-multi` and E2eConfig's E2E_SOURCE_* variables.
+#
+# Requires Docker Compose >= 2.24 for the `!override` YAML tag.
+#
+# Every service pins `restart: "no"`. The base stack uses `unless-stopped`, which
+# for a test slice means a Ctrl-C'd run leaves containers that survive reboots and
+# keep holding the e2e ports.
+
+services:
+  db:
+    container_name: "${COMPOSE_PROJECT_NAME:-jobfit-e2e}-db"
+    restart: "no"
+    ports: !override
+      - "127.0.0.1:${E2E_POSTGRES_PORT:-15433}:5432"
+    environment:
+      # Pinned, not inherited: compose interpolates the repo-root .env regardless of
+      # project name, so a dev with custom POSTGRES_* would initialise the e2e DB with
+      # credentials E2eConfig's default connection string doesn't know about.
+      POSTGRES_USER: jobfit
+      POSTGRES_PASSWORD: jobfit
+      POSTGRES_DB: jobfit
+
+  bridge:
+    container_name: "${COMPOSE_PROJECT_NAME:-jobfit-e2e}-bridge"
+    restart: "no"
+    # Explicit tags so CI can pre-build via `docker buildx bake` (GHA layer cache)
+    # and `up -d` (no --build) starts exactly those images.
+    image: jobfit-e2e/bridge
+    ports: !override
+      - "127.0.0.1:${E2E_BRIDGE_PORT:-18765}:8765"
+    volumes:
+      # Fresh, repo-local queue store — never the production ~/.openclaw/jd-bridge.
+      - ${E2E_STATE_DIR:-./.e2e}/bridge-store:/data
+
+  markserv:
+    container_name: "${COMPOSE_PROJECT_NAME:-jobfit-e2e}-markserv"
+    restart: "no"
+    image: jobfit-e2e/markserv
+    ports: !override
+      - "127.0.0.1:${E2E_MARKSERV_PORT:-18082}:8081"
+    volumes:
+      - ${E2E_STATE_DIR:-./.e2e}/output:/data:ro
+
+  # Keep these production-only ingestion services out of a direct merged-compose `up`.
+  # Their mounts remain explicitly redirected so an intentional profile activation is
+  # still isolated from JFAA_DATA_ROOT and real Gmail credentials/API quotas.
+  poller:
+    profiles: ["e2e-disabled"]
+    volumes:
+      - ${E2E_STATE_DIR:-./.e2e}/poller-secrets:/secrets
+
+  jsearch:
+    profiles: ["e2e-disabled"]
+    environment:
+      # Never inherit a developer's production quota credential in an explicitly enabled profile.
+      JSEARCH_API_KEY: ""
+    volumes:
+      - ${E2E_STATE_DIR:-./.e2e}/jsearch-state:/state
+
+  processor:
+    container_name: "${COMPOSE_PROJECT_NAME:-jobfit-e2e}-processor"
+    restart: "no"
+    image: jobfit-e2e/processor
+    depends_on: !override
+      bridge:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    environment:
+      # The in-process fake LLM in the e2e test JVM (host side).
+      #
+      # The default is 21436, NOT the production oMLX port 11436 that docker-compose.yml
+      # points the production processor at. Sharing 11436 breaks isolation both ways: the
+      # fake binds 0.0.0.0 fine while oMLX holds 127.0.0.1 (SO_REUSEADDR) but the
+      # more-specific socket wins, so the e2e run silently hits real oMLX and times out —
+      # and with oMLX down the fake answers the *production* processor with fixture data.
+      # Under REAL_LLM=1 the Makefile sets this to 11436 deliberately (no fake is started).
+      MLX_LOCAL_BASE_URL: "http://host.docker.internal:${E2E_FAKE_LLM_PORT:-21436}/v1"
+      # Never reach for Steel or a host Chrome in e2e — JD_SCRAPED jobs skip scraping.
+      STEEL_BASE_URL: ""
+    volumes:
+      - ${E2E_STATE_DIR:-./.e2e}/output:/app/output
+      - ${E2E_STATE_DIR:-./.e2e}/state:/app/state
+      # Written by scripts/e2e-ci-prepare.sh (carries ARTIFACT_BASE_URL — dotenv, not
+      # compose env, because an empty compose var would win over the mounted file).
+      - ${E2E_STATE_DIR:-./.e2e}/pipeline.env:/app/.env:ro
+      # Committed synthetic fixtures mounted straight in — the real files are never copied over.
+      - ./services/job-fit-apply-ai-e2e/fixtures/resume.yaml:/app/src/main/resources/resume/resume.yaml:ro
+      - ./services/job-fit-apply-ai-e2e/fixtures/candidate_profile.yaml:/app/config/candidate_profile.yaml:ro
+
+  notifier:
+    container_name: "${COMPOSE_PROJECT_NAME:-jobfit-e2e}-notifier"
+    restart: "no"
+    image: jobfit-e2e/notifier
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Point both channels at the in-process mock sink in the e2e test JVM.
+      DISCORD_API_BASE: "http://host.docker.internal:${E2E_SINK_PORT:-18099}"
+      TELEGRAM_API_BASE: "http://host.docker.internal:${E2E_SINK_PORT:-18099}"
+      # Dummy creds so the configured-checks pass and requests actually fire.
+      DISCORD_BOT_TOKEN: "e2e-discord-token"
+      DISCORD_CHANNEL_ID: "e2e-channel"
+      # Override both namespaced and legacy values: namespaced credentials take precedence in the
+      # notifier, and no real bot credential may enter the E2E container.
+      NOTIFIER_TELEGRAM_BOT_TOKEN: "e2e-telegram-token"
+      NOTIFIER_TELEGRAM_CHAT_ID: "e2e-chat"
+      TELEGRAM_BOT_TOKEN: "e2e-telegram-token"
+      TELEGRAM_CHAT_ID: "e2e-chat"
+      # Default 20s poll would dominate the test's wall clock.
+      NOTIFIER_POLL_INTERVAL_MS: "2000"
+      # Pinned, not inherited from the repo-root .env: the canned fit_score is 72, and a
+      # dev with NOTIFICATION_FIT_THRESHOLD=90 would otherwise see the high-fit Telegram
+      # assertions fail with no hint that their private .env is the cause.
+      NOTIFICATION_FIT_THRESHOLD: "50"
+    volumes:
+      - ${E2E_STATE_DIR:-./.e2e}/notifier-state:/state

@@ -13,9 +13,13 @@ import com.jd.pipeline.models.CandidateProfile
  *  - [renderForTailoring] — identity, summary, **per-role bullet lists**,
  *    strengths, skills, languages, domain. **No preferences** — tailor nodes
  *    don't need (and shouldn't see) compensation, visa, or relocation context.
+ *  - [renderForReply] — the fullest grounding: identity, summary, **per-role
+ *    bullet lists**, projects with bullets, strengths, skills, the evidence
+ *    bank, **and** preferences. Used by `DraftReplyComposer` so recruiter
+ *    replies only answer questions the résumé/profile actually support.
  *
  * The shared `Background` portion (identity + summary + skills + languages
- * + domain + core strengths) is identical between the two; only the
+ * + domain + core strengths) is identical between the flavours; only the
  * career-history / projects detail and preferences differ.
  */
 object CandidateProfileRenderer {
@@ -25,6 +29,15 @@ object CandidateProfileRenderer {
         appendCareerHistoryTable(profile)
         appendProjectsTable(profile)
         appendStrengthsAndSkills(profile)
+        appendPreferences(profile)
+    }.trimEnd() + "\n"
+
+    fun renderForReply(profile: CandidateProfile): String = buildString {
+        appendHeader(profile)
+        appendCareerHistoryWithBullets(profile)
+        appendProjectsWithBullets(profile)
+        appendStrengthsAndSkills(profile)
+        appendEvidenceBank(profile)
         appendPreferences(profile)
     }.trimEnd() + "\n"
 

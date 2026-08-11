@@ -65,4 +65,22 @@ class ConfigTest {
         assertTrue(Config.POLL_INTERVAL_MS > 0)
         assertTrue(Config.HEALTH_MAX_AGE_MS > 0)
     }
+
+    @Test
+    @DisplayName("namespaced notifier credential wins over the legacy value")
+    fun namespacedCredentialWins() {
+        assertEquals("notifier-bot", resolveCredential("notifier-bot", "legacy-bot"))
+    }
+
+    @Test
+    @DisplayName("blank notifier credential falls back to the legacy value")
+    fun blankNamespacedCredentialFallsBack() {
+        assertEquals("legacy-bot", resolveCredential("   ", "legacy-bot"))
+    }
+
+    @Test
+    @DisplayName("missing credentials resolve to blank")
+    fun missingCredentialsResolveBlank() {
+        assertEquals("", resolveCredential(null, null))
+    }
 }

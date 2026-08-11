@@ -6,6 +6,7 @@ import com.jd.pipeline.client.BrowserFactory
 import com.jd.pipeline.client.CdpBrowser
 import com.jd.pipeline.client.LlmCaller
 import com.jd.pipeline.client.LlmClient
+import com.jd.pipeline.client.SigninServer
 import com.jd.pipeline.config.Config
 import com.jd.pipeline.state.JDState
 import com.microsoft.playwright.Page
@@ -174,7 +175,7 @@ class ScrapeJdNode(
                     // Any authenticated CDP site (LinkedIn, Glassdoor, Jobright, …) that hit a login
                     // or challenge wall: skip it for the batch and send ONE phone re-auth alert.
                     batchAuthExpiredDomains.add(host)
-                    alerts.reauthRequired(e.site, detail = e.message, linkUrl = reauthLink())
+                    alerts.reauthRequired(e.site, detail = e.message, linkUrl = reauthLink(e.site))
                     input.copy(
                         isChromeSessionExpired = true,
                         error = "scrape_jd: ${e.message}"
@@ -374,8 +375,12 @@ class ScrapeJdNode(
             throw CdpUnavailableException(cdpUnavailableMessage())
         }
         log("[scrape_jd] Using CDP Chrome for LinkedIn: $url")
-        val page = cdpBrowser.pageForDomain(extractHost(url))
-        return scrapeLinkedInPage(page, url).copy(scrapePath = "cdp_profile")
+        // See fetchPageWithPlaywright: recovery must wrap the navigate/extract, not just the tab.
+        // AuthRequiredException from requireAuthenticated is not a PlaywrightException, so it still
+        // propagates on the first attempt rather than burning retries on a genuine auth wall.
+        return cdpBrowser.withPageForDomain(extractHost(url)) { page ->
+            scrapeLinkedInPage(page, url).copy(scrapePath = "cdp_profile")
+        }
     }
 
     /**
@@ -411,12 +416,19 @@ class ScrapeJdNode(
         Config.STEEL_BASE_URL.ifBlank { Config.CHROME_CDP_ENDPOINT }
 
     /**
-     * Interactive re-auth link for the sign-in alert: the live Steel session's debug URL when
-     * available (open on a phone over Tailscale), else the configured Steel UI / base URL, else null
-     * (host-Chrome path has no remote link — sign in at the machine).
+     * Interactive re-auth link for the sign-in alert, best first:
+     *
+     *  1. The tap-to-sign-in endpoint ([SigninServer]), which creates a session *when tapped* and
+     *     parks it on [site]'s login page. Preferred because it is the only option that still works
+     *     after this batch ends — which is the normal case, since a human reads the alert minutes to
+     *     hours later.
+     *  2. The live Steel session's debug URL — valid only until this batch closes the session
+     *     (~10 min), so it is a fallback for when the endpoint isn't advertised.
+     *  3. The bare Steel UI / base URL, which has no session behind it at all.
      */
-    private fun reauthLink(): String? =
-        cdpBrowser.debugUrl()
+    private fun reauthLink(site: String): String? =
+        SigninServer.signinUrl(site)
+            ?: cdpBrowser.debugUrl()
             ?: Config.STEEL_UI_URL.ifBlank { Config.STEEL_BASE_URL }.takeIf { it.isNotBlank() }
 
     /** Fire the "browser backend unreachable" alert once per batch, only when a backend is configured. */
@@ -664,6 +676,10 @@ class ScrapeJdNode(
         Config.CDP_FORCE_DOMAINS.split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
     }
 
+    // jobright.ai is force-CDP by configuration (CDP_FORCE_DOMAINS in .env / .env.example) — its full
+    // JD only renders in the logged-in session. Kept in config rather than hardcoded here so the
+    // list stays in one place; when that routing does not help, ScoreFitNode refuses to score the
+    // digest stub that survives.
     private fun isForceCdpHost(host: String): Boolean = matchesDomainSuffix(host, forceCdpDomains)
 
     /** True when [host] equals, or is a subdomain of, any entry in [domains]. */
@@ -702,8 +718,10 @@ class ScrapeJdNode(
             val jsonEnd = content.indexOf("\n\n")
             if (jsonEnd > 0) {
                 val nextDataJson = content.substring("PAGE_JSON_DATA:\n".length, jsonEnd)
-                state = applyJobrightStructuredData(state, nextDataJson)
-                log("[scrape_jd] Jobright structured extraction applied")
+                val extracted = applyJobrightStructuredData(state, nextDataJson)
+                if (extracted !== state) log("[scrape_jd] Jobright structured extraction applied")
+                else log("[scrape_jd] Jobright __NEXT_DATA__ present but no fields extracted (schema mismatch?)")
+                state = extracted
             }
         }
 
@@ -859,94 +877,105 @@ class ScrapeJdNode(
         DEFAULT_SCRAPE_SKILL_PROMPT
     }
 
-    private fun isJobrightUrl(url: String): Boolean {
-        val host = extractHost(url)
-        return host == "jobright.ai" || host.endsWith(".jobright.ai")
-    }
+    private fun isJobrightUrl(url: String): Boolean = isJobrightHost(extractHost(url))
+
+    private fun isJobrightHost(host: String): Boolean =
+        host == "jobright.ai" || host.endsWith(".jobright.ai")
 
     /**
      * Parses Jobright's __NEXT_DATA__ JSON to extract fields not reliably present in visible text.
      * Jobright is a Next.js app; all structured job data lives in the server-rendered JSON blob.
      * Only populates fields that are blank in the current state (LLM runs after this and can override).
      */
-    private fun applyJobrightStructuredData(state: JDState, nextDataJson: String): JDState {
+    internal fun applyJobrightStructuredData(state: JDState, nextDataJson: String): JDState {
         return try {
             val root = mapper.readTree(nextDataJson)
             val pageProps = root.path("props").path("pageProps")
+            val dataSource = pageProps.path("dataSource")
 
-            // Jobright stores job data under pageProps.job or pageProps.jobData
-            val job = sequenceOf("job", "jobData", "jobDetails", "data")
-                .map { pageProps.path(it) }
-                .firstOrNull { !it.isMissingNode && !it.isNull }
+            // Current Jobright schema nests the job under pageProps.dataSource.jobResult (company data
+            // is a sibling at dataSource.companyResult). Older layouts put it directly on pageProps —
+            // kept as fallbacks so a schema revert doesn't silently break extraction again.
+            val job = sequenceOf(
+                dataSource.path("jobResult"),
+                pageProps.path("job"),
+                pageProps.path("jobData"),
+                pageProps.path("jobDetails"),
+                pageProps.path("data"),
+            ).firstOrNull { !it.isMissingNode && !it.isNull }
                 ?: return state
+            val companyNode = sequenceOf(dataSource.path("companyResult"), job.path("company"))
+                .firstOrNull { !it.isMissingNode && !it.isNull }
 
             var s = state
 
             // Employment type
             if (s.employmentType.isBlank()) {
-                val raw = sequenceOf("jobType", "employment_type", "employmentType", "type")
-                    .map { job.path(it).asText("") }.firstOrNull { it.isNotBlank() }
-                if (raw != null) {
-                    s = s.copy(employmentType = normalizeEmploymentType(raw))
-                }
+                val raw = firstText(job, "employmentType", "jobType", "employment_type", "type")
+                if (raw.isNotBlank()) s = s.copy(employmentType = normalizeEmploymentType(raw))
             }
 
             // Seniority level
             if (s.seniorityLevel.isBlank()) {
-                val raw = sequenceOf("seniorityLevel", "seniority_level", "level", "experienceLevel", "seniority")
-                    .map { job.path(it).asText("") }.firstOrNull { it.isNotBlank() }
-                if (raw != null) s = s.copy(seniorityLevel = raw)
+                val raw = firstText(job, "jobSeniority", "seniorityLevel", "seniority_level", "level", "experienceLevel", "seniority")
+                if (raw.isNotBlank()) s = s.copy(seniorityLevel = raw)
+            }
+
+            // Years of experience required
+            if (s.yoeRequired == null) {
+                val yoe = sequenceOf("minYearsOfExperience", "yearsOfExperience", "yoe", "minExperience")
+                    .map { job.path(it).asInt(0) }.firstOrNull { it > 0 }
+                if (yoe != null) s = s.copy(yoeRequired = yoe)
+            }
+
+            // Remote policy (JDState defaults to "unknown", not blank)
+            if (s.remotePolicy.isBlank() || s.remotePolicy == "unknown") {
+                val workModel = firstText(job, "workModel", "remotePolicy", "remote_policy")
+                val remote = when {
+                    workModel.isNotBlank() -> workModel
+                    job.path("isRemote").asBoolean(false) -> "Remote"
+                    else -> ""
+                }
+                if (remote.isNotBlank()) s = s.copy(remotePolicy = remote)
+            }
+
+            // Location
+            if (s.location.isBlank() || s.location == "unknown") {
+                val loc = firstText(job, "jobLocation", "location")
+                    .ifBlank { job.path("jobLocations").firstOrNull()?.asText("") ?: "" }
+                if (loc.isNotBlank()) s = s.copy(location = loc)
             }
 
             // Salary
             if (s.salaryRange.isBlank()) {
-                val min = job.path("salaryMin").asLong(0).takeIf { it > 0 }
-                    ?: job.path("salary_min").asLong(0).takeIf { it > 0 }
-                val max = job.path("salaryMax").asLong(0).takeIf { it > 0 }
-                    ?: job.path("salary_max").asLong(0).takeIf { it > 0 }
-                val salaryStr = job.path("salaryString").asText("")
-                    .ifBlank { job.path("salary_string").asText("") }
-                s = s.copy(salaryRange = when {
+                val salaryStr = firstText(job, "salaryDesc", "salaryString", "salary_string")
+                val min = sequenceOf("minSalary", "salaryMin", "salary_min").map { job.path(it).asLong(0) }.firstOrNull { it > 0 }
+                val max = sequenceOf("maxSalary", "salaryMax", "salary_max").map { job.path(it).asLong(0) }.firstOrNull { it > 0 }
+                val salary = when {
                     salaryStr.isNotBlank() -> salaryStr
                     min != null && max != null -> "\$${min / 1000}K – \$${max / 1000}K"
                     min != null -> "\$${min / 1000}K+"
-                    else -> s.salaryRange
-                })
+                    else -> ""
+                }
+                if (salary.isNotBlank()) s = s.copy(salaryRange = salary)
             }
 
             // Benefits
             if (s.benefits.isEmpty()) {
-                val benefitsNode = job.path("benefits").takeIf { it.isArray }
-                    ?: job.path("perks").takeIf { it.isArray }
-                if (benefitsNode != null) {
-                    val list = benefitsNode.mapNotNull { node ->
-                        node.asText("").takeIf { it.isNotBlank() }
-                            ?: node.path("name").asText("").takeIf { it.isNotBlank() }
-                    }
-                    if (list.isNotEmpty()) s = s.copy(benefits = list)
-                }
+                val list = firstList(job, "benefitsSummaries", "benefits", "perks")
+                if (list.isNotEmpty()) s = s.copy(benefits = list)
             }
 
             // Company description
-            if (s.companyDescription.isBlank()) {
-                val companyNode = job.path("company").takeIf { !it.isMissingNode && !it.isNull }
-                val desc = sequenceOf("companyDescription", "company_description", "description", "about", "overview")
-                    .map { companyNode?.path(it)?.asText("") ?: job.path(it).asText("") }
-                    .firstOrNull { it.isNotBlank() }
-                if (desc != null) s = s.copy(companyDescription = desc)
+            if (s.companyDescription.isBlank() && companyNode != null) {
+                val desc = firstText(companyNode, "companyDesc", "companyDescription", "company_description", "description", "about", "overview")
+                if (desc.isNotBlank()) s = s.copy(companyDescription = desc)
             }
 
-            // Tech stack / skills
+            // Tech stack / skills — jdCoreSkills holds {skill, score, type} objects on the current schema.
             if (s.techStack.isEmpty()) {
-                val skillsNode = sequenceOf("skills", "requiredSkills", "required_skills", "techStack", "tech_stack")
-                    .map { job.path(it) }.firstOrNull { it.isArray }
-                if (skillsNode != null) {
-                    val skills = skillsNode.mapNotNull { node ->
-                        node.asText("").takeIf { it.isNotBlank() }
-                            ?: node.path("name").asText("").takeIf { it.isNotBlank() }
-                    }
-                    if (skills.isNotEmpty()) s = s.copy(techStack = skills)
-                }
+                val skills = firstList(job, "jdCoreSkills", "skills", "requiredSkills", "required_skills", "techStack", "tech_stack")
+                if (skills.isNotEmpty()) s = s.copy(techStack = skills)
             }
 
             // Full job description text — assemble from all available sections.
@@ -955,25 +984,21 @@ class ScrapeJdNode(
                 val sections = mutableListOf<String>()
 
                 // About / company overview
-                val aboutText = sequenceOf("about", "aboutCompany", "about_company", "companyDescription", "company_description")
-                    .map { job.path(it).asText("") }.firstOrNull { it.isNotBlank() }
-                    ?: s.companyDescription.takeIf { it.isNotBlank() }
-                if (aboutText != null) sections.add("About the Company\n$aboutText")
+                val aboutText = firstSection(job, "about", "aboutCompany", "about_company", "companyDescription", "company_description")
+                    .ifBlank { s.companyDescription }
+                if (aboutText.isNotBlank()) sections.add("About the Company\n$aboutText")
 
                 // Main job description
-                val descText = sequenceOf("description", "jobDescription", "job_description", "jobSummary", "summary")
-                    .map { job.path(it).asText("") }.firstOrNull { it.isNotBlank() }
-                if (descText != null) sections.add(descText)
-
-                // Qualifications / requirements
-                val qualText = sequenceOf("qualifications", "requirements", "jobQualifications", "job_qualifications")
-                    .map { job.path(it).asText("") }.firstOrNull { it.isNotBlank() }
-                if (qualText != null) sections.add("Qualifications\n$qualText")
+                val descText = firstSection(job, "jobSummary", "description", "jobDescription", "job_description", "summary")
+                if (descText.isNotBlank()) sections.add(descText)
 
                 // Responsibilities
-                val respText = sequenceOf("responsibilities", "jobResponsibilities", "job_responsibilities", "duties")
-                    .map { job.path(it).asText("") }.firstOrNull { it.isNotBlank() }
-                if (respText != null) sections.add("Responsibilities\n$respText")
+                val respText = firstSection(job, "coreResponsibilities", "responsibilities", "jobResponsibilities", "job_responsibilities", "duties")
+                if (respText.isNotBlank()) sections.add("Responsibilities\n$respText")
+
+                // Qualifications / requirements
+                val qualText = firstSection(job, "skillSummaries", "qualifications", "requirements", "jobQualifications", "job_qualifications")
+                if (qualText.isNotBlank()) sections.add("Qualifications\n$qualText")
 
                 if (sections.isNotEmpty()) s = s.copy(jdText = sections.joinToString("\n\n"))
             }
@@ -983,6 +1008,41 @@ class ScrapeJdNode(
             log("[scrape_jd] Jobright __NEXT_DATA__ parse failed: ${e.message}")
             state
         }
+    }
+
+    /** First non-blank string value among [keys] on [node] (ignores literal "null"). */
+    private fun firstText(node: com.fasterxml.jackson.databind.JsonNode, vararg keys: String): String =
+        keys.asSequence().map { node.path(it).asText("").trim() }
+            .firstOrNull { it.isNotEmpty() && it != "null" } ?: ""
+
+    /**
+     * Flattens the first array field among [keys] into a list of strings. Array elements may be plain
+     * strings or objects — for objects the "skill" then "name" property is used (covers jdCoreSkills).
+     */
+    private fun firstList(node: com.fasterxml.jackson.databind.JsonNode, vararg keys: String): List<String> {
+        val arr = keys.asSequence().map { node.path(it) }.firstOrNull { it.isArray } ?: return emptyList()
+        return arr.mapNotNull { el ->
+            when {
+                el.isTextual -> el.asText("").takeIf { it.isNotBlank() }
+                else -> firstText(el, "skill", "name").takeIf { it.isNotBlank() }
+            }
+        }
+    }
+
+    /**
+     * Renders the first present section among [keys] as text: a string field verbatim, or an array
+     * field as newline-joined "- " bullets (Jobright stores responsibilities/qualifications as arrays).
+     */
+    private fun firstSection(node: com.fasterxml.jackson.databind.JsonNode, vararg keys: String): String {
+        for (k in keys) {
+            val v = node.path(k)
+            if (v.isTextual && v.asText().isNotBlank()) return v.asText().trim()
+            if (v.isArray) {
+                val items = v.mapNotNull { el -> el.takeIf { it.isTextual }?.asText()?.trim()?.takeIf { it.isNotBlank() } }
+                if (items.isNotEmpty()) return items.joinToString("\n") { "- $it" }
+            }
+        }
+        return ""
     }
 
     private fun normalizeEmploymentType(raw: String): String = when (raw.uppercase().replace("-", "_").replace(" ", "_")) {
@@ -1093,8 +1153,9 @@ class ScrapeJdNode(
             throw CdpUnavailableException(cdpUnavailableMessage())
         }
         log("[scrape_jd] Using CDP Chrome for $url")
-        val page = cdpBrowser.pageForDomain(extractHost(url))
-        return extractDynamicPage(page, url)
+        // withPageForDomain (not pageForDomain): a Steel session that dies mid-scrape surfaces during
+        // the navigate/extract below, not during tab acquisition, so recovery has to wrap both.
+        return cdpBrowser.withPageForDomain(extractHost(url)) { page -> extractDynamicPage(page, url) }
     }
 
     /**

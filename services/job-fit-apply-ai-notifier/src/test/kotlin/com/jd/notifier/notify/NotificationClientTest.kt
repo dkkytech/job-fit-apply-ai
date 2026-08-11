@@ -2,6 +2,7 @@ package com.jd.notifier.notify
 
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -91,5 +92,25 @@ class NotificationClientTest {
         val c = NotificationClient(discordToken = "   ", discordChannelId = "  ", telegramToken = " ", telegramChatId = "  ")
         assertFalse(c.discordConfigured)
         assertFalse(c.telegramConfigured)
+    }
+
+    @Test
+    @DisplayName("default API bases produce the real Discord/Telegram URLs")
+    fun defaultBasesProduceRealUrls() {
+        val c = NotificationClient(discordToken = "tok", discordChannelId = "chan", telegramToken = "tg", telegramChatId = "chat")
+        assertEquals("https://discord.com/api/v10/channels/chan/messages", c.discordMessagesUrl())
+        assertEquals("https://api.telegram.org/bottg/sendMessage", c.telegramSendMessageUrl())
+    }
+
+    @Test
+    @DisplayName("overridden API bases (e.g. an e2e sink) produce the expected URLs, trailing slash tolerated")
+    fun overriddenBasesProduceSinkUrls() {
+        val c = NotificationClient(
+            discordToken = "tok", discordChannelId = "chan", telegramToken = "tg", telegramChatId = "chat",
+            discordApiBase = "http://host.docker.internal:18099/",
+            telegramApiBase = "http://host.docker.internal:18099",
+        )
+        assertEquals("http://host.docker.internal:18099/api/v10/channels/chan/messages", c.discordMessagesUrl())
+        assertEquals("http://host.docker.internal:18099/bottg/sendMessage", c.telegramSendMessageUrl())
     }
 }

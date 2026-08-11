@@ -10,6 +10,7 @@ import com.jd.pipeline.models.CandidateProfile
 import com.jd.pipeline.models.JdStructured
 import com.jd.pipeline.state.JDState
 import com.jd.pipeline.state.PipelineAction
+import com.jd.pipeline.state.isDigest
 import java.nio.file.Files
 
 /**
@@ -34,6 +35,23 @@ class ScoreFitNode(
                 fitScore = 0f,
                 pipelineAction = PipelineAction.SKIP,
                 skippedReason = "No JD text to score"
+            )
+        }
+        // A digest child seeds its jdText with the one-line summary from the digest email
+        // ("<role> @ <company> | <loc> | <salary> | <url>"). When the follow-up scrape of the real
+        // posting fails — blocked, auth wall, or a thin logged-out preview — that stub is what
+        // survives, and scoring it produces a confident number derived from a job title and a URL.
+        // Refuse instead. Deliberately enforced HERE and not by blanking jdText upstream: the bridge
+        // rejects a submit under 150 chars, so a blanked digest child would be silently dropped
+        // before it ever got a job of its own. Skipping at score time keeps the terminal label, the
+        // completed event and the run-log line intact, so the scrape gap stays visible and retryable.
+        if (input.isDigest && jdText.length < MIN_DIGEST_JD_CHARS) {
+            println("[score_fit] Skipping ${input.roleTitle} @ ${input.company} — digest stub JD (${jdText.length} chars)")
+            return input.copy(
+                fitScore = 0f,
+                pipelineAction = PipelineAction.SKIP,
+                skippedReason = "JD is a ${jdText.length}-char digest summary, not a real posting " +
+                    "(the follow-up scrape did not return one)"
             )
         }
 
@@ -265,6 +283,14 @@ class ScoreFitNode(
     }
 
     companion object {
+        /**
+         * Shortest JD a digest-derived job may be scored on. Below this it is the digest email's
+         * one-line summary rather than a real posting, so the scrape that should have replaced it
+         * failed. Matches the run-analyzer's own thin-digest threshold (`analyzer/sources.py`), so
+         * what the pipeline refuses to score is exactly what the analyzer reports.
+         */
+        const val MIN_DIGEST_JD_CHARS = 400
+
         const val CANDIDATE_PROFILE_PLACEHOLDER = "{{CANDIDATE_PROFILE}}"
 
         /**

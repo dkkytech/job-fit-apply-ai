@@ -39,8 +39,10 @@ val JOBS_DIR get() = STORE_DIR.resolve("jobs")
 private val DEDUP_WINDOW_HOURS =
     (System.getenv("JD_BRIDGE_DEDUP_WINDOW_HOURS")?.toLongOrNull() ?: 72L)
 
-// Stale claim threshold: claimed rows older than this are re-queued.
-private val STALE_CLAIM_MILLIS = 30L * 60 * 1000   // 30 minutes
+// Stale claim threshold: claimed rows older than this are re-queued. Configurable because a
+// 30-minute default makes stale-claim recovery untestable — see StoreTest.
+private val STALE_CLAIM_MILLIS =
+    (System.getenv("JD_BRIDGE_STALE_CLAIM_SECONDS")?.toLongOrNull() ?: 1800L) * 1000L
 
 private var _database: Database? = null
 
@@ -67,6 +69,10 @@ internal object Jobs : Table("jobs") {
     val artifactUrl     = text("artifact_url").nullable()   // markserv report URL
     val error           = text("error").nullable()
     val claimedAt       = long("claimed_at").nullable()
+    // Fencing token, rotated on every claim. A worker must present the token it was handed to
+    // record a result, so a claim that was requeued underneath it cannot overwrite the attempt
+    // that replaced it. Nullable: cleared on requeue, and absent on rows claimed before this existed.
+    val claimToken      = text("claim_token").nullable()
     val createdAt       = long("created_at")
     val updatedAt       = long("updated_at")
 
@@ -174,12 +180,14 @@ suspend fun enqueue(
 suspend fun claimNext(): ClaimedJob? = dbQuery {
     val now = System.currentTimeMillis()
 
-    // Requeue stale claims inline (cheap single-pass).
+    // Requeue stale claims inline (cheap single-pass). Clearing the token is what fences the
+    // displaced worker: its held token no longer matches anything, so its late result is refused.
     val staleThreshold = now - STALE_CLAIM_MILLIS
     Jobs.update({ (Jobs.status eq JobStatus.CLAIMED.value) and (Jobs.claimedAt less staleThreshold) }) {
-        it[Jobs.status]    = JobStatus.PENDING.value
-        it[Jobs.claimedAt] = null
-        it[Jobs.updatedAt] = now / 1000L
+        it[Jobs.status]     = JobStatus.PENDING.value
+        it[Jobs.claimedAt]  = null
+        it[Jobs.claimToken] = null
+        it[Jobs.updatedAt]  = now / 1000L
     }
 
     val row = Jobs.selectAll()
@@ -189,23 +197,68 @@ suspend fun claimNext(): ClaimedJob? = dbQuery {
         ?: return@dbQuery null
 
     val jobId = row[Jobs.id]
+    val claimToken = java.util.UUID.randomUUID().toString()
     Jobs.update({ Jobs.id eq jobId }) {
-        it[Jobs.status]    = JobStatus.CLAIMED.value
-        it[Jobs.claimedAt] = now
-        it[Jobs.updatedAt] = now / 1000L
+        it[Jobs.status]     = JobStatus.CLAIMED.value
+        it[Jobs.claimedAt]  = now
+        it[Jobs.claimToken] = claimToken
+        it[Jobs.updatedAt]  = now / 1000L
     }
 
     val jdJson = row[Jobs.jdJson] ?: return@dbQuery null
-    ClaimedJob(id = jobId, type = row[Jobs.type], jdJson = jdJson)
+    ClaimedJob(id = jobId, type = row[Jobs.type], jdJson = jdJson, claimToken = claimToken)
+}
+
+/** What [recordResult] did — the caller turns this into a status code. */
+enum class ResultOutcome {
+    /** First terminal result for this job: persisted, completed_seq assigned. */
+    RECORDED,
+
+    /**
+     * The job was already terminal. Ignored — completion is idempotent. Without this, a
+     * duplicate or late POST assigned a *second* completed_seq, so the job appeared twice in
+     * the completed feed and the Notifier delivered it twice.
+     */
+    ALREADY_TERMINAL,
+
+    /**
+     * The presented claim token is not the one the row currently holds — the claim was
+     * requeued and re-claimed underneath this worker. Refused, so a slow worker cannot
+     * overwrite the attempt that replaced it.
+     */
+    STALE_CLAIM,
 }
 
 /**
  * Persist the worker's result and move the row to DONE or ERROR.
+ *
+ * A `null` [ResultRequest.claim_token] is accepted against any row: a worker built before
+ * fencing existed would otherwise have every result refused during a rolling deploy, wedging
+ * the queue. That is a version skew, not the hazard being defended against — a *displaced*
+ * worker always holds a token, and a stale one is refused.
  */
-suspend fun recordResult(jobId: String, req: ResultRequest) {
+suspend fun recordResult(jobId: String, req: ResultRequest): ResultOutcome {
     val now = System.currentTimeMillis() / 1000L
     val newStatus = if (req.error != null) JobStatus.ERROR else JobStatus.DONE
-    // Concurrency-safe monotonic cursor (survives Phase-2 parallel Processors).
+
+    val guard = dbQuery {
+        val row = Jobs.selectAll().where { Jobs.id eq jobId }.firstOrNull()
+        when {
+            row == null -> null
+            row[Jobs.completedSeq] != null &&
+                row[Jobs.status] in listOf(JobStatus.DONE.value, JobStatus.ERROR.value) ->
+                ResultOutcome.ALREADY_TERMINAL
+            req.claim_token != null && req.claim_token != row[Jobs.claimToken] ->
+                ResultOutcome.STALE_CLAIM
+            else -> null
+        }
+    }
+    if (guard != null) {
+        log.warn("Result for $jobId ignored: $guard")
+        return guard
+    }
+
+    // Only now is a sequence number burned — an ignored result must not consume one.
     val nextSeq = completedSeqCounter.incrementAndGet()
     dbQuery {
         Jobs.update({ Jobs.id eq jobId }) { row ->
@@ -220,6 +273,7 @@ suspend fun recordResult(jobId: String, req: ResultRequest) {
             req.job_url?.let { row[Jobs.jobUrl] = it }
             req.artifact_url?.let { row[Jobs.artifactUrl] = it }
             row[Jobs.claimedAt]       = null
+            row[Jobs.claimToken]      = null
             row[Jobs.updatedAt]       = now
             // Gmail write-back payload
             row[Jobs.terminalLabel]   = req.terminal_label
@@ -230,6 +284,7 @@ suspend fun recordResult(jobId: String, req: ResultRequest) {
             row[Jobs.completedSeq]    = nextSeq
         }
     }
+    return ResultOutcome.RECORDED
 }
 
 /**

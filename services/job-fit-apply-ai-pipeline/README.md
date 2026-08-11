@@ -17,7 +17,7 @@ The pipeline is split into two halves connected by the bridge job queue:
 - Classifies the email, expands digests into per-job records, and scrapes each job page (HTTP-first + schema.org JSON-LD for most boards; the logged-in host Chrome over CDP for LinkedIn and challenge-prone sites).
 - Submits each ingested job to the bridge queue; `--max-emails` is fire-and-forget while `--email` polls the single job to completion.
 - The processor claims jobs from the queue and runs the processing pipeline: deduplicates, scores fit, runs `ResumeTailoringSubgraph`, renders a tailored HTML preview + PDF (YAML → LaTeX/tectonic), and appends a run record to `output/runs/run_log.jsonl`.
-- Tracks every job in Supabase and, when the source is a recruiter email, drafts a reply with your preferences pre-filled.
+- Tracks every job in Supabase and, when the source is a recruiter email, drafts a reply grounded in your résumé + `candidate_profile.yaml` — it only answers questions the profile supports, and opens by asking for the client/budget when the recruiter withheld them.
 
 ## Quick start
 
@@ -235,9 +235,42 @@ All node-level model variables default to `qwen3.5:9b-q4_K_M`. Override per node
 | `CDP_FORCE_DOMAINS` | _(empty)_ — comma-separated domains that always scrape via the CDP browser (e.g. `glassdoor.com`) |
 | `STEEL_BASE_URL` | _(empty)_ — set to `http://steel:3000` to drive a self-hosted [Steel Browser](https://github.com/steel-dev/steel-browser) instead of host Chrome (sessions + persisted auth + phone re-auth). Blank falls back to `CHROME_CDP_ENDPOINT`. |
 | `STEEL_UI_URL` | _(empty)_ — tailnet base for the interactive debug link in re-auth alerts (open on a phone to sign in) |
+| `STEEL_SIGNIN_PUBLIC_URL` | _(empty)_ — tailnet base for the **tap-to-sign-in** endpoint, e.g. `http://<tailscale-name>:3100`. Setting it is the on/off switch: blank means the endpoint isn't started and re-auth alerts fall back to the short-lived debug link. |
+| `STEEL_SIGNIN_BIND_ADDR` / `STEEL_SIGNIN_PORT` | `127.0.0.1` / `3100` — host interface the endpoint is published on. Set the address to the host's Tailscale IP; never `0.0.0.0`. |
+| `STEEL_SIGNIN_TOKEN` | _(empty)_ — when set, required as `?token=` and included in the alert link. Recommended. |
+| `STEEL_SIGNIN_WINDOW_MS` | `1800000` (30 min) — how long a sign-in session stays open. A ceiling: it closes as soon as the sign-in lands. |
 | `PLAYWRIGHT_TIMEOUT_MS` | `45000` |
 | `PLAYWRIGHT_HEADLESS` | `false` |
 | `PLAYWRIGHT_FALLBACK_ON_CAPTCHA` | `true` |
+
+#### Re-authenticating a job board (Steel)
+
+When a board drops its session, the pipeline sends one Telegram/Discord alert per site. The link in
+that alert goes to the **tap-to-sign-in endpoint**, which creates the browser session *at the moment
+you tap it*:
+
+1. opens a Steel session (30 min) with your persisted cookies injected,
+2. parks it on that board's login page,
+3. redirects you into the interactive live view,
+4. merges cookies into the `storageState` store every 10s until the login wall clears, then pings you.
+
+There is nothing to confirm — capture is continuous, so a sign-in is saved even if you close the tab
+or the window expires. While a sign-in is open the scraper stands down (Steel has one Chrome), so
+browser scrapes fall back to plain HTTP until it finishes.
+
+> **Why not link to the live scrape session?** That session is released when the batch ends (and
+> self-expires after `STEEL_SESSION_TIMEOUT_MS`, 10 min), so by the time you read the alert and tap,
+> there is no page left to sign into. Human latency can't be covered by a pre-created session.
+
+The same flow is available from the CLI, e.g. after a cold start:
+
+```bash
+docker exec jobfit-processor /app/bin/job-fit-apply-ai-pipeline --steel-signin linkedin
+```
+
+It accepts a site name, a host, or a full URL, prints the phone link, and captures automatically —
+no TTY required (press ENTER to finish early if you are at a terminal). Because the boards share
+Google SSO, one sign-in usually refreshes them all.
 
 #### Persistent Chrome over CDP (required for browser scraping)
 
@@ -275,6 +308,20 @@ To keep it up automatically, install the optional launch agent
 (re)launches Chrome when it's actually down, so it recovers from a crash, a manual `Cmd-Q`, or a
 hung-but-alive Chrome within one interval. Because it relaunches on demand, `Cmd-Q` won't stick
 while it's loaded — `launchctl bootout` the agent to stop it.
+
+**Steel backend watchdog.** When scraping runs through the self-hosted Steel container
+(`STEEL_BASE_URL=http://steel:3000`) rather than host Chrome, the equivalent failure is Steel
+*wedging*: it reuses one long-lived Chrome, and if that browser's primary page dies, every
+`POST /v1/sessions` returns HTTP 500 (`Failed to refresh primary page when reusing browser
+instance`) until the container restarts — every browser scrape silently falls back to the thin
+email snippet. The trap is that Steel's API (`GET /v1/sessions`, `/v1/health`) keeps answering
+`200`, so the container looks healthy and Docker's `restart: unless-stopped` never fires. Two
+guards address this: the Compose healthcheck now probes **real session creation** (not just the
+API) so a wedge surfaces as `unhealthy` in `docker ps`, and the optional
+`scripts/com.jd.steel-watchdog.plist` launch agent runs `scripts/steel-watchdog.sh` every 120s —
+it does one createSession probe and, on two consecutive failures, `docker restart`s `jobfit-steel`
+(install/uninstall commands are in the plist header). Immediate manual recovery is just
+`docker restart jobfit-steel`.
 
 **What routes through the browser:** most sites are scraped over plain HTTP (fast, uses embedded
 schema.org JSON-LD). The CDP browser is used for **LinkedIn** (always), for pages the HTTP fetch

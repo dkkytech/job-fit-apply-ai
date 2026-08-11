@@ -1,0 +1,10 @@
+{
+  "seniority_alignment": 20,
+  "quantification": 20,
+  "format_safety": 20,
+  "top_improvements": [
+    "Make platform ownership explicit",
+    "Add supported must-have terminology",
+    "Strengthen quantified outcomes"
+  ]
+}

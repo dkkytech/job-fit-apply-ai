@@ -235,6 +235,43 @@ class MetadataUtilsTest {
         assertTrue(content.contains("## Email Context"))
         assertTrue(content.contains("recruiter@emailco.com"))
         assertTrue(content.contains("Job Opportunity: Engineer"))
+        // Source cell links the label to the originating email in Gmail.
+        assertTrue(
+            content.contains("| Source | <a href=\"https://mail.google.com/mail/u/0/#all/email-001\" target=\"_blank\" rel=\"noopener noreferrer\">email</a> |"),
+            "Source row should link 'email' to the Gmail deep-link"
+        )
+
+        // ...and metadata.json carries the deep-link.
+        val json = Files.readString(tempDir.resolve("metadata.json"))
+        assertTrue(
+            json.contains("https://mail.google.com/mail/u/0/#all/email-001"),
+            "metadata.json should carry email_url"
+        )
+    }
+
+    @Test
+    @DisplayName("Source cell is a plain label (no Gmail link) for non-email jobs")
+    fun testSourceCellNoLinkForNonEmail(@TempDir tempDir: Path) {
+        // Given: an API/jsearch-sourced job (no email intake)
+        val state = JDState(
+            outputPath = tempDir.toString(),
+            company = "ApiCo",
+            roleTitle = "Engineer",
+            intake = IntakeContext.Api(board = "linkedin")
+        )
+        Files.createDirectories(tempDir)
+
+        // When
+        MetadataUtils.writeMetadata(state)
+
+        // Then: the Source row shows the plain label with no anchor
+        val content = Files.readString(tempDir.resolve("report.md"))
+        assertTrue(content.contains("| Source | api |"), "non-email jobs should render a plain source label")
+        assertFalse(content.contains("mail.google.com"), "non-email jobs must not link to Gmail")
+
+        // metadata.json email_url is null for non-email jobs
+        val json = Files.readString(tempDir.resolve("metadata.json"))
+        assertTrue(json.contains("\"email_url\" : null"), "metadata.json email_url should be null for non-email jobs")
     }
 
     @Test

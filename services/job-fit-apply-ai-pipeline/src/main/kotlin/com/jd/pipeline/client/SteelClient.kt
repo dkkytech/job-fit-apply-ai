@@ -11,6 +11,13 @@ import java.net.http.HttpResponse
 import java.time.Duration
 
 /**
+ * A Steel REST call returned a non-2xx status. Carries the [statusCode] so callers can decide
+ * whether to retry — e.g. a fast, transient HTTP 5xx (the SingletonLock race while Chrome relaunches)
+ * is worth an in-scrape retry, whereas a timeout (a different exception type) is not.
+ */
+class SteelHttpException(val statusCode: Int, message: String) : RuntimeException(message)
+
+/**
  * Thin REST client for a self-hosted Steel Browser (https://github.com/steel-dev/steel-browser).
  *
  * Only the three calls the scraper needs:
@@ -60,8 +67,11 @@ class SteelClient(
             .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
             .build()
         val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
-        require(resp.statusCode() in 200..299) {
-            "Steel createSession failed: HTTP ${resp.statusCode()} — ${resp.body().take(300)}"
+        if (resp.statusCode() !in 200..299) {
+            throw SteelHttpException(
+                resp.statusCode(),
+                "Steel createSession failed: HTTP ${resp.statusCode()} — ${resp.body().take(300)}",
+            )
         }
         return mapper.readValue(resp.body(), SteelSession::class.java)
     }

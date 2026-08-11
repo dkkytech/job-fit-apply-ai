@@ -94,6 +94,7 @@ object MetadataUtils {
             put("is_duplicate", state.isDuplicate)
             putNullable("email_subject", state.emailIntake?.subject?.ifEmpty { null })
             putNullable("email_from", state.emailIntake?.from?.ifEmpty { null })
+            putNullable("email_url", gmailUrl(state.emailIntake?.emailId))
             putNullable("fit_reasoning", state.fitReasoning.ifEmpty { null })
             set<com.fasterxml.jackson.databind.JsonNode>("strengths", mapper.valueToTree(state.strengths))
             set<com.fasterxml.jackson.databind.JsonNode>("gaps", mapper.valueToTree(state.gaps))
@@ -147,7 +148,7 @@ object MetadataUtils {
             appendLine("| Employment Type | ${state.employmentType.ifEmpty { "—" }} |")
             appendLine("| Seniority | ${state.seniorityLevel.ifEmpty { "—" }} |")
             appendLine("| YOE Required | ${state.yoeRequired?.toString() ?: "—"} |")
-            appendLine("| Source | ${state.sourceLabel()} |")
+            appendLine("| Source | ${sourceCell(state)} |")
             appendLine("| Job Board | ${state.jobBoard.ifEmpty { "—" }} |")
             appendLine("| Job Posting | ${linkOrNA(state.jobUrl)} |")
             appendLine()
@@ -246,5 +247,21 @@ object MetadataUtils {
 
     private fun linkOrNA(url: String?, label: String = "URL"): String {
         return if (!url.isNullOrEmpty()) "<a href=\"$url\" target=\"_blank\" rel=\"noopener noreferrer\">$label</a>" else "N/A"
+    }
+
+    // The "u/0" in the deep-link is the first signed-in Gmail account. This is a
+    // single-user system, so the account index is fixed at 0.
+    private const val GMAIL_ACCOUNT_INDEX = 0
+
+    /** Gmail web deep-link to the originating email, or null when there's no usable id. */
+    private fun gmailUrl(emailId: String?): String? =
+        emailId?.takeIf { it.isNotBlank() }
+            ?.let { "https://mail.google.com/mail/u/$GMAIL_ACCOUNT_INDEX/#all/$it" }
+
+    /** Source label, linked to the originating email in Gmail for email-sourced jobs. */
+    private fun sourceCell(state: JDState): String {
+        val label = state.sourceLabel()
+        val url = gmailUrl(state.emailIntake?.emailId) ?: return label
+        return "<a href=\"$url\" target=\"_blank\" rel=\"noopener noreferrer\">$label</a>"
     }
 }

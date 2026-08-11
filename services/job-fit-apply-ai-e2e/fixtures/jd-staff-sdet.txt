@@ -1,0 +1,16 @@
+Staff Software Engineer in Test — {{COMPANY}} (Remote)
+
+About the role:
+We are looking for a Staff SDET to lead quality engineering across our mobile and
+backend platforms. You will own the test strategy, build automation frameworks from
+scratch, and partner closely with engineering leadership to define quality gates.
+
+Requirements:
+- 7+ years of software engineering experience with a focus on test automation
+- Expert-level proficiency in Kotlin and/or Swift for mobile test automation
+- Hands-on experience with Espresso, XCUITest, and Jetpack Compose UI testing
+- Strong CI/CD skills — Bitrise, GitHub Actions, or CircleCI pipeline ownership
+- Experience building test infrastructure: device farms (Firebase Test Lab, BrowserStack)
+- Solid understanding of API testing (REST, gRPC) and contract testing (Pact)
+- Ability to mentor engineers and drive testing culture across teams
+- Experience with observability tools: Datadog, Grafana, or equivalent

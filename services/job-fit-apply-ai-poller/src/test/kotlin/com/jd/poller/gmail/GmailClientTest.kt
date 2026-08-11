@@ -467,7 +467,13 @@ class GmailClientTest {
         assertEquals("draft-3", id)
         val mime = capturedMimeMessage(rig)
         assertTrue(mime.content is javax.mail.Multipart, "attachment present -> multipart content")
-        assertEquals(2, (mime.content as javax.mail.Multipart).count)   // text part + the one real attachment
+        val mp = mime.content as javax.mail.Multipart
+        assertEquals(2, mp.count)   // text part + the one real attachment
+
+        // The PDF attachment must be renamed to RichardHatcherResume.pdf — the temp file
+        // "poller-artifact-*.pdf" name must never leak into the recruiter's inbox.
+        val attachPart = mp.getBodyPart(1) as javax.mail.internet.MimeBodyPart
+        assertEquals("RichardHatcherResume.pdf", attachPart.fileName, "PDF attachment should be named RichardHatcherResume.pdf")
     }
 
     private fun capturedDraftMessage(rig: Rig): Message {

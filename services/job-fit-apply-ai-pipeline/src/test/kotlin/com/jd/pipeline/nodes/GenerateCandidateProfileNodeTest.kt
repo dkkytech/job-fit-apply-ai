@@ -100,6 +100,24 @@ class GenerateCandidateProfileNodeTest {
         assertContains(fields, "visa_status")
     }
 
+    @Test
+    @DisplayName("findTodoFields returns an empty list when no sentinels remain")
+    fun findsNoTodoFieldsWhenClean() {
+        assertEquals(emptyList(), node.findTodoFields(profileConfigYaml(withTodoVisa = false)))
+    }
+
+    @Test
+    @DisplayName("interactiveEdit surfaces a schema error when the (clean) config does not parse")
+    fun rejectsSchemaMismatch(@TempDir tempDir: Path) {
+        val path = tempDir.resolve("candidate_profile.yaml")
+        // No __TODO__ markers, so the editor is skipped and parseConfig runs directly — but the
+        // YAML is not a valid CandidateProfileConfig, exercising the parse-error branch.
+        Files.writeString(path, "scoring: \"this should be a mapping, not a string\"\n")
+
+        val ex = assertFails { node.interactiveEdit(path) }
+        assertContains(ex.message ?: "", "does not match the schema")
+    }
+
     // ── fixtures ───────────────────────────────────────────────────────────────
 
     private fun sampleResumeYaml() = """

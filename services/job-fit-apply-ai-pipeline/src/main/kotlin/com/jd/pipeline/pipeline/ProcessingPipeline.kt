@@ -52,6 +52,10 @@ class ProcessingPipeline(
                 company        = record.company,
                 roleTitle      = record.roleTitle,
                 jobUrl         = record.jobUrl,
+                // Carry it on the failure path too. A job that died in processing is precisely when
+                // you want to know how its JD was fetched, and this fallback bypasses the normal
+                // state → result mapping that would otherwise supply it.
+                scrapePath     = record.scrapePath,
             )
         }
     }
@@ -75,6 +79,9 @@ class ProcessingPipeline(
             yoeRequired      = record.yoeRequired,
             techStack        = record.techStack ?: emptyList(),
             candidateProfile = profile,
+            // Seed from the record so the ingestion-side scrape path survives into the result, and
+            // from there into the run_log. Processing never scrapes, so nothing overwrites this.
+            scrapePath       = record.scrapePath,
         )
 
         val isRecruiter = state.isRecruiterEmail

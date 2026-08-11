@@ -36,7 +36,7 @@ BASE_BRANCH = ENV.get("RUN_ANALYZER_AUTOFIX_BASE", "main")
 BRANCH_PREFIX = ENV.get("RUN_ANALYZER_AUTOFIX_BRANCH_PREFIX", "analyzer/autofix")
 CLAUDE_BIN = ENV.get("CLAUDE_BIN", "claude")
 GH_BIN = ENV.get("GH_BIN", "gh")
-GRADLE_TEST = ENV.get("RUN_ANALYZER_AUTOFIX_GATE", "./gradlew test")
+GRADLE_TEST = ENV.get("RUN_ANALYZER_AUTOFIX_GATE", "cd services/job-fit-apply-ai-pipeline && ./gradlew test")
 
 ANALYZER_DIR = Path(ENV.get("ANALYZER_DIR", ".")).resolve()
 FINDINGS_ROOT = ANALYZER_DIR / "findings"

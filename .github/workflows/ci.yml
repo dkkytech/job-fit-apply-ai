@@ -191,9 +191,9 @@ jobs:
       - name: Run unit tests
         run: ./gradlew test --tests "com.jd.pipeline.nodes.*" --tests "com.jd.pipeline.cli.*" --tests "com.jd.pipeline.pipeline.*" --tests "com.jd.pipeline.utils.*" --tests "com.jd.pipeline.fixtures.*" --tests "com.jd.pipeline.functional.*" --tests "com.jd.pipeline.client.*" --tests "com.jd.pipeline.config.*" --tests "com.jd.pipeline.models.*" --tests "com.jd.pipeline.state.*"
 
+      # Blocking as of 2026-08-03 — green on every run inspected since 2026-08-01.
       - name: Run integration tests
         run: ./gradlew test --tests "com.jd.pipeline.integration.*"
-        continue-on-error: true
 
       - name: JaCoCo coverage report
         run: ./gradlew jacocoTestReport
@@ -393,7 +393,20 @@ jobs:
           flags: notifier
           token: ${{ secrets.CODECOV_TOKEN }}
 
-  # ── 4d. Run-analyzer (Python unittest, stdlib-only) ─────────────────────────
+  # ── 4d. Compose data-root mount contract (docker only — no JVM, no build) ──
+  # Its own job: the contract is pure `docker compose config`, so it should report in seconds
+  # rather than waiting behind the e2e job's three upstream Kotlin builds.
+  compose-data-root:
+    name: Compose — data-root contract
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Compose data-root contract
+        run: make compose-data-root-test
+
+  # ── 4e. Run-analyzer (Python unittest, stdlib-only) ─────────────────────────
   run-analyzer:
     name: Run-analyzer — unittest
     runs-on: ubuntu-latest
@@ -412,11 +425,181 @@ jobs:
       - name: Unit + integration tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
-  # ── 5. Allure Report — collect, generate, publish ───────────────────────────
+  # ── 5. E2E — Bridge → Processor → Notifier against the compose slice ────────
+  # Fake LLM + notification sink run inside the test JVM (services/job-fit-apply-ai-e2e);
+  # containers reach them via host.docker.internal. Blocking as of 2026-08-03: 13 consecutive
+  # green runs since it landed on 2026-07-29, including the four-scenario expansion in #58.
+  # A red suite now fails the workflow — see the junit-results-e2e / e2e-compose-logs artifacts.
+  e2e:
+    name: E2E — Bridge → Processor → Notifier
+    runs-on: ubuntu-latest
+    needs: [bridge, pipeline, notifier]
+    # Backstop against a wedged slice burning the 6h default job budget.
+    timeout-minutes: 45
+
+    env:
+      COMPOSE_PROJECT_NAME: jobfit-e2e
+      # Must match between compose interpolation and the test JVM. 21436, not the
+      # production oMLX port 11436 — see docker-compose.e2e.yml.
+      E2E_FAKE_LLM_PORT: '21436'
+      E2E_SINK_PORT: '18099'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-e2e-${{ hashFiles('services/job-fit-apply-ai-e2e/**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-e2e-
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Prepare bind-mount sources
+        run: ./scripts/e2e-ci-prepare.sh --fresh
+
+      # Build the four images with the GHA layer cache. The processor image is the
+      # expensive one (apt + pinned tectonic + TeX warm-up compile) and is fully
+      # cacheable — a warm run skips all of it.
+      - name: Build images (buildx bake + GHA cache)
+        uses: docker/bake-action@v5
+        with:
+          source: .
+          files: |
+            docker-compose.yml
+            docker-compose.e2e.yml
+          targets: |
+            bridge
+            markserv
+            processor
+            notifier
+          load: true
+          # Per-target cache scopes. `type=gha` defaults to scope=buildkit, and the
+          # Actions cache API is write-once per key — with a single shared scope the
+          # four targets race and whichever finishes first wins, so the expensive
+          # processor image (apt + pinned tectonic + TeX warm-up) would randomly
+          # restore nothing and rebuild cold.
+          #
+          # processor exports mode=min on purpose: mode=max on that image would push
+          # every intermediate layer into a 10 GB repo-wide LRU cache and evict the
+          # ~/.gradle entries the five service jobs depend on.
+          set: |
+            bridge.cache-from=type=gha,scope=e2e-bridge
+            bridge.cache-to=type=gha,mode=max,scope=e2e-bridge
+            markserv.cache-from=type=gha,scope=e2e-markserv
+            markserv.cache-to=type=gha,mode=max,scope=e2e-markserv
+            processor.cache-from=type=gha,scope=e2e-processor
+            processor.cache-to=type=gha,mode=min,scope=e2e-processor
+            notifier.cache-from=type=gha,scope=e2e-notifier
+            notifier.cache-to=type=gha,mode=max,scope=e2e-notifier
+
+      # --wait blocks until every started service is healthy and fails immediately if
+      # one exits, which the old hand-rolled inspect loop could not distinguish from
+      # "still starting" — it waited the full 240s per container, serially.
+      - name: Start the e2e slice
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml \
+            up -d --wait --wait-timeout 300 db bridge markserv processor notifier
+
+      # Second, prod-shaped "source" slice for the multi-instance acceptance scenarios
+      # (#56 sc. 9/10): own project name, ports, and ./.e2e-src state; db/bridge/markserv/
+      # notifier only — no processor, no intake. Reuses the images baked above, so this
+      # adds container start time, not build time. CI never mounts real production data:
+      # both slices are repo-local synthetic state.
+      - name: Start the source slice (multi-instance scenarios)
+        env:
+          COMPOSE_PROJECT_NAME: jobfit-e2e-src
+          E2E_STATE_DIR: ./.e2e-src
+          E2E_POSTGRES_PORT: '15434'
+          E2E_BRIDGE_PORT: '19765'
+          E2E_MARKSERV_PORT: '19082'
+        run: |
+          E2E_STATE_DIR=.e2e-src ./scripts/e2e-ci-prepare.sh --fresh
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml \
+            up -d --wait --wait-timeout 240 db bridge markserv notifier
+
+      - name: Dump container logs if the slice never came up
+        if: failure()
+        run: |
+          for c in jobfit-e2e-db jobfit-e2e-bridge jobfit-e2e-markserv jobfit-e2e-processor jobfit-e2e-notifier; do
+            echo "::group::$c"
+            # 2>&1: JVM stack traces go to stderr, which a bare pipe to tail would let
+            # through unbounded while claiming to show the last 50 lines.
+            docker logs --tail 50 "$c" 2>&1 || true
+            echo "::endgroup::"
+          done
+
+      - name: Run e2e suite
+        working-directory: services/job-fit-apply-ai-e2e
+        env:
+          # Presence of E2E_SOURCE_BRIDGE_URL is what activates MultiInstanceE2ETest.
+          E2E_SOURCE_BRIDGE_URL: http://127.0.0.1:19765
+          E2E_SOURCE_DATABASE_URL: postgresql://jobfit:jobfit@127.0.0.1:15434/jobfit
+          E2E_SOURCE_STATE_DIR: ../../.e2e-src
+          E2E_SOURCE_PROJECT: jobfit-e2e-src
+          E2E_PROJECT: jobfit-e2e
+        run: chmod +x ./gradlew && ./gradlew test
+
+      # Scenario 9's teardown clause: stopping/resetting the test instance must leave the
+      # source instance healthy. The job-level COMPOSE_PROJECT_NAME targets the test slice.
+      - name: Stop the test slice and verify the source slice survives
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml down --remove-orphans
+          curl -sf http://127.0.0.1:19765/health
+          [ "$(docker inspect -f '{{.State.Health.Status}}' jobfit-e2e-src-bridge)" = healthy ]
+          echo "source slice healthy after test-slice teardown"
+
+      - name: Dump compose logs
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml \
+            logs --no-color > e2e-compose-logs.txt || true
+
+      - name: Upload compose logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-compose-logs
+          path: e2e-compose-logs.txt
+          if-no-files-found: ignore
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-e2e
+          path: services/job-fit-apply-ai-e2e/build/allure-results
+          if-no-files-found: warn
+
+      - name: Upload JUnit XML results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-results-e2e
+          path: services/job-fit-apply-ai-e2e/build/test-results/test
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml \
+            down -v --remove-orphans || true
+          COMPOSE_PROJECT_NAME=jobfit-e2e-src E2E_STATE_DIR=./.e2e-src \
+            docker compose -f docker-compose.yml -f docker-compose.e2e.yml \
+            down -v --remove-orphans || true
+
+  # ── 6. Allure Report — collect, generate, publish ───────────────────────────
   allure-report:
     name: Allure Report → GitHub Pages
     runs-on: ubuntu-latest
-    needs: [web-app, extension, bridge, pipeline, poller, jsearch, notifier]
+    needs: [web-app, extension, bridge, pipeline, poller, jsearch, notifier, e2e]
     if: always()
     permissions:
       contents: write
@@ -451,6 +634,13 @@ jobs:
         with:
           name: allure-results-pipeline
           path: allure-results/pipeline
+        continue-on-error: true
+
+      - name: Download e2e results
+        uses: actions/download-artifact@v4
+        with:
+          name: allure-results-e2e
+          path: allure-results/e2e
         continue-on-error: true
 
       # Merge all sub-directories into one flat allure-results folder

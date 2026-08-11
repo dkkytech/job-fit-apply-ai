@@ -18,9 +18,30 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Instance selection: ENV_FILE (Makefile passes .env.test for `make e2e-smoke INSTANCE=test`)
+# carries the instance's ports, container prefix, and data root. Prod default reads .env the
+# same way doctor.sh does, so behavior with no ENV_FILE set is unchanged.
+ENV_FILE="${ENV_FILE:-.env}"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090,SC1091
+  . "./$ENV_FILE"
+  set +a
+fi
+export JFAA_ENV_FILE="$ROOT/$ENV_FILE"
+P="${CONTAINER_PREFIX:-jobfit}"
+if [ "$ENV_FILE" = ".env" ]; then
+  COMPOSE=(docker compose)
+else
+  COMPOSE=(docker compose --env-file "$ENV_FILE")
+fi
+
 BRIDGE="http://127.0.0.1:${JD_BRIDGE_PORT:-8765}"
 TIMEOUT="${SMOKE_TIMEOUT:-1800}"
-OUTPUT_DIR="services/job-fit-apply-ai-pipeline/output"
+# This smoke drives the BASE compose stack, so it must read the same root-derived host tree the
+# processor writes to (#67) — not the pre-migration checkout path.
+. "$ROOT/scripts/jfaa-data-root.sh"
+OUTPUT_DIR="$(jfaa_pipeline_output)"
 
 say()  { printf "\033[1m[e2e]\033[0m %s\n" "$1"; }
 pass() { printf "\033[32m[e2e] ✓ %s\033[0m\n" "$1"; }
@@ -33,10 +54,10 @@ json_get() { # json_get <json> <field>  — top-level string/number field or emp
 # ── 1. Bring up the smoke slice and wait for health ──────────────────────────
 # --build so the smoke always exercises current source, not a stale image.
 say "Building + starting db + bridge + processor…"
-docker compose up -d --build db bridge processor >/dev/null
+"${COMPOSE[@]}" up -d --build db bridge processor >/dev/null
 
 say "Waiting for containers to report healthy…"
-for c in jobfit-db jobfit-bridge jobfit-processor; do
+for c in "$P-db" "$P-bridge" "$P-processor"; do
   deadline=$((SECONDS + 180))
   until [ "$(docker inspect -f '{{.State.Health.Status}}' "$c" 2>/dev/null)" = "healthy" ]; do
     [ "$SECONDS" -ge "$deadline" ] && fail "$c not healthy after 180s  →  docker logs $c"
@@ -47,7 +68,7 @@ pass "db, bridge, processor healthy"
 
 # ── 2. CDP pre-check: container → host Chrome over CDP (fast, before the long run) ──
 say "CDP pre-check (container → host Chrome)…"
-if docker compose run --rm processor --test-chrome https://example.com/ 2>&1 | grep -q "Connected to Chrome over CDP"; then
+if "${COMPOSE[@]}" run --rm processor --test-chrome https://example.com/ 2>&1 | grep -q "Connected to Chrome over CDP"; then
   pass "container reaches the host CDP Chrome (Host-header rewrite works)"
 else
   if [ "${E2E_REQUIRE_CDP:-0}" = "1" ]; then
@@ -92,7 +113,7 @@ print(json.dumps({
 PY
 )"
 RESP="$(curl -sf -X POST "$BRIDGE/api/jobs" -H 'Content-Type: application/json' -d "$SUBMIT_BODY")" \
-  || fail "POST $BRIDGE/api/jobs failed — bridge logs: docker logs jobfit-bridge"
+  || fail "POST $BRIDGE/api/jobs failed — bridge logs: docker logs $P-bridge"
 JOB_ID="$(json_get "$RESP" job_id)"
 [ -n "$JOB_ID" ] || fail "no job_id in submit response: $RESP"
 pass "submitted job $JOB_ID"
@@ -102,12 +123,12 @@ say "Waiting for the processor (timeout ${TIMEOUT}s — LLM-bound, typically min
 deadline=$((SECONDS + TIMEOUT))
 STATUS=""
 while :; do
-  [ "$SECONDS" -ge "$deadline" ] && fail "job $JOB_ID still '$STATUS' after ${TIMEOUT}s  →  docker logs jobfit-processor"
+  [ "$SECONDS" -ge "$deadline" ] && fail "job $JOB_ID still '$STATUS' after ${TIMEOUT}s  →  docker logs $P-processor"
   STATE="$(curl -sf "$BRIDGE/api/jobs/$JOB_ID" || echo '{}')"
   STATUS="$(json_get "$STATE" status)"
   case "$STATUS" in
     done)  break ;;
-    error) fail "job $JOB_ID errored: $(json_get "$STATE" error)  →  docker logs jobfit-processor" ;;
+    error) fail "job $JOB_ID errored: $(json_get "$STATE" error)  →  docker logs $P-processor" ;;
   esac
   sleep 10
 done

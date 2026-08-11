@@ -16,6 +16,8 @@
 #   RUN_ANALYZER_MODEL     analysis model (oMLX local default Qwen3.5-9B-OptiQ-4bit)
 #   JD_BRIDGE_URL          bridge base URL (default http://127.0.0.1:8765)
 #   RUN_ANALYZER_AUTOFIX   set to 1 to arm the --autofix loop (default off)
+#   RUN_ANALYZER_TELEGRAM_BOT_TOKEN / _CHAT_ID
+#                         analyzer Telegram destination (falls back to TELEGRAM_*)
 #   PROJECT_DIR            pipeline checkout (auto-detected from this script's location)
 #   Cadence gate (analysis only defers small batches; see analyze.py):
 #     RUN_ANALYZER_MIN_BATCH       analyze once >= N new jobs accrue    (default 10)
@@ -48,12 +50,17 @@ MODE="analyze"
 # ── Resolve paths (worktree-friendly: derive from this script's location) ────────────
 ANALYZER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-$(cd "$ANALYZER_DIR/../.." && pwd)}"
+REPO_ROOT="$(cd "$PROJECT_DIR/../.." && pwd)"
 STATE_DIR="$ANALYZER_DIR/state"
 mkdir -p "$STATE_DIR"
 
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 export RUN_TS
-export RUN_LOG="$PROJECT_DIR/output/runs/run_log.jsonl"
+# The processor writes run_log.jsonl into its /app/output bind, whose host source moved out of the
+# checkout in #67. Resolve it the same way compose does — a hardcoded $PROJECT_DIR/output would read
+# a frozen pre-migration copy and report run_log_missing for every job.
+. "$REPO_ROOT/scripts/jfaa-data-root.sh"
+export RUN_LOG="$(jfaa_pipeline_output)/runs/run_log.jsonl"
 export FINDINGS_DIR="$ANALYZER_DIR/findings/$RUN_TS"
 export CURSOR_FILE="$STATE_DIR/cursor"
 export PENDING_FILE="$STATE_DIR/pending_since"
@@ -90,9 +97,12 @@ if [ -f "$PROJECT_DIR/.env" ]; then
     export OLLAMA_CLOUD_BASE_URL="${OLLAMA_CLOUD_BASE_URL:-$(grep -E '^OLLAMA_CLOUD_BASE_URL=' "$PROJECT_DIR/.env" | cut -d= -f2-)}"
     export MLX_LOCAL_BASE_URL="${MLX_LOCAL_BASE_URL:-$(grep -E '^MLX_LOCAL_BASE_URL=' "$PROJECT_DIR/.env" | cut -d= -f2-)}"
     export MLX_API_KEY="${MLX_API_KEY:-$(grep -E '^MLX_API_KEY=' "$PROJECT_DIR/.env" | cut -d= -f2-)}"
-    # Notification creds (Discord/Telegram) — no-op downstream when blank.
+    # Notification creds — namespaced analyzer Telegram values win; generic values remain
+    # as a backward-compatible fallback in analyzer/notify.py.
     export DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-$(grep -E '^DISCORD_BOT_TOKEN=' "$PROJECT_DIR/.env" | cut -d= -f2-)}"
     export DISCORD_CHANNEL_ID="${DISCORD_CHANNEL_ID:-$(grep -E '^DISCORD_CHANNEL_ID=' "$PROJECT_DIR/.env" | cut -d= -f2-)}"
+    export RUN_ANALYZER_TELEGRAM_BOT_TOKEN="${RUN_ANALYZER_TELEGRAM_BOT_TOKEN:-$(grep -E '^RUN_ANALYZER_TELEGRAM_BOT_TOKEN=' "$PROJECT_DIR/.env" | cut -d= -f2-)}"
+    export RUN_ANALYZER_TELEGRAM_CHAT_ID="${RUN_ANALYZER_TELEGRAM_CHAT_ID:-$(grep -E '^RUN_ANALYZER_TELEGRAM_CHAT_ID=' "$PROJECT_DIR/.env" | cut -d= -f2-)}"
     export TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-$(grep -E '^TELEGRAM_BOT_TOKEN=' "$PROJECT_DIR/.env" | cut -d= -f2-)}"
     export TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-$(grep -E '^TELEGRAM_CHAT_ID=' "$PROJECT_DIR/.env" | cut -d= -f2-)}"
     MODEL="${RUN_ANALYZER_MODEL:-$(grep -E '^RUN_ANALYZER_MODEL=' "$PROJECT_DIR/.env" | cut -d= -f2-)}"

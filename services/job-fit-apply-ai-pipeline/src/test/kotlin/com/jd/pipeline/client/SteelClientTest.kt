@@ -114,12 +114,13 @@ class SteelClientTest {
     }
 
     @Test
-    @DisplayName("createSession throws on a non-2xx response")
+    @DisplayName("createSession throws a SteelHttpException carrying the status code on a non-2xx response")
     fun createSessionError() {
         failCreate = true
-        assertThrows<IllegalArgumentException> {
+        val e = assertThrows<SteelHttpException> {
             SteelClient(baseUrl).createSession(sessionContext = null, timeoutMs = 1_000)
         }
+        assertEquals(500, e.statusCode)
     }
 
     @Test

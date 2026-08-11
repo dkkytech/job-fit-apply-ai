@@ -32,7 +32,14 @@ class BridgeClient(
      * POST /api/jobs — submit a record; returns the job_id.
      * Returns the existing job_id if the bridge deduped the submission.
      */
-    fun submit(record: JdRecord): String {
+    fun submit(record: JdRecord): String = submitDetailed(record).jobId
+
+    /**
+     * As [submit], but keeps the bridge's `deduped` flag. Digest fan-out needs it: "the child was
+     * already submitted by an earlier attempt" and "the child was newly queued" are both success,
+     * and telling them apart is what makes a retried fan-out verifiably non-duplicating.
+     */
+    fun submitDetailed(record: JdRecord): SubmitOutcome {
         val json = mapper.writeValueAsString(record)
         val req = HttpPost("$baseUrl/api/jobs").apply {
             entity = StringEntity(json, ContentType.APPLICATION_JSON)
@@ -40,7 +47,11 @@ class BridgeClient(
         return http.execute(req) { resp ->
             val body = EntityUtils.toString(resp.entity, Charsets.UTF_8)
             check(resp.code in 200..202) { "POST /api/jobs → ${resp.code}: $body" }
-            mapper.readTree(body).get("job_id").asText()
+            val tree = mapper.readTree(body)
+            SubmitOutcome(
+                jobId = tree.get("job_id").asText(),
+                deduped = tree.get("deduped")?.asBoolean(false) ?: false,
+            )
         }
     }
 
@@ -84,8 +95,20 @@ class BridgeClient(
         }
     }
 
-    fun postResult(jobId: String, result: ProcessingResult) {
-        val json = mapper.writeValueAsString(result)
+    /**
+     * POST the terminal result. [claimToken] is the fence the bridge handed out with the claim:
+     * if this claim was requeued and re-claimed while we were working, the bridge refuses the
+     * write (409) rather than letting us overwrite the attempt that replaced us.
+     */
+    fun postResult(jobId: String, result: ProcessingResult, claimToken: String? = null) {
+        val json = if (claimToken == null) {
+            mapper.writeValueAsString(result)
+        } else {
+            mapper.writeValueAsString(
+                mapper.valueToTree<com.fasterxml.jackson.databind.node.ObjectNode>(result)
+                    .put("claim_token", claimToken),
+            )
+        }
         val req = HttpPost("$baseUrl/api/jobs/$jobId/result").apply {
             entity = StringEntity(json, ContentType.APPLICATION_JSON)
         }
@@ -155,12 +178,17 @@ data class ClaimedPageCapture(
     val title: String = "",
 )
 
+/** Result of a submission: the job it maps to, and whether the bridge deduped it. */
+data class SubmitOutcome(val jobId: String, val deduped: Boolean)
+
 data class ClaimDto(
     val jobId: String,
     val type: String = WorkItemType.JD_SCRAPED,
     val jdRecord: JdRecord? = null,               // set for JD_SCRAPED
     val email: ClaimedEmail? = null,              // set for EMAIL_RAW
     val pageCapture: ClaimedPageCapture? = null,  // set for JD_PAGE_RAW
+    /** Fence for this claim; present it on postResult. Null against a pre-fencing bridge. */
+    val claimToken: String? = null,
 )
 
 /** Parse a /api/queue/claim response body into a [ClaimDto], branching on the work-item type. */
@@ -168,14 +196,15 @@ internal fun parseClaimTree(tree: com.fasterxml.jackson.databind.JsonNode): Clai
     val mapper = Json.mapper
     val jobId = tree.get("job_id").asText()
     val type = tree.get("type")?.asText() ?: WorkItemType.JD_SCRAPED
+    val token = tree.get("claim_token")?.takeIf { !it.isNull }?.asText()
     val payload = tree.get("jd_record")
         ?: throw RuntimeException("claim response missing jd_record")
     return when (type) {
         WorkItemType.EMAIL_RAW ->
-            ClaimDto(jobId = jobId, type = type, email = mapper.treeToValue(payload, ClaimedEmail::class.java))
+            ClaimDto(jobId = jobId, type = type, email = mapper.treeToValue(payload, ClaimedEmail::class.java), claimToken = token)
         WorkItemType.JD_PAGE_RAW ->
-            ClaimDto(jobId = jobId, type = type, pageCapture = mapper.treeToValue(payload, ClaimedPageCapture::class.java))
+            ClaimDto(jobId = jobId, type = type, pageCapture = mapper.treeToValue(payload, ClaimedPageCapture::class.java), claimToken = token)
         else ->
-            ClaimDto(jobId = jobId, type = type, jdRecord = mapper.treeToValue(payload, JdRecord::class.java))
+            ClaimDto(jobId = jobId, type = type, jdRecord = mapper.treeToValue(payload, JdRecord::class.java), claimToken = token)
     }
 }

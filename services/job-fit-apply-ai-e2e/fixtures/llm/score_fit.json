@@ -1,0 +1,26 @@
+{
+  "fit_score": 72,
+  "fit_reasoning": "Strong overlap on mobile automation frameworks, CI pipeline ownership, and observability tooling; gap on contract testing.",
+  "dimension_scores": {"skills": 78, "seniority": 74, "domain": 70, "logistics": 90},
+  "strengths": [
+    {"claim": "Espresso and XCUITest framework ownership", "jd_evidence": "Hands-on experience with Espresso, XCUITest, and Jetpack Compose UI testing"},
+    {"claim": "CI/CD pipeline ownership", "jd_evidence": "Strong CI/CD skills - Bitrise, GitHub Actions, or CircleCI pipeline ownership"}
+  ],
+  "gaps": [
+    {"claim": "Contract testing experience", "jd_evidence": "contract testing (Pact)"}
+  ],
+  "red_flags": [],
+  "hard_gate_violations": [],
+  "posted_comp_min": null,
+  "posted_comp_max": null,
+  "work_arrangement": "remote",
+  "office_location": "",
+  "confidence": 0.9,
+  "role_title": "Staff Software Engineer in Test",
+  "seniority": "staff",
+  "required_skills": ["Kotlin", "Espresso", "XCUITest", "CI/CD"],
+  "preferred_skills": ["Datadog", "Grafana"],
+  "domain_keywords": ["mobile quality engineering", "test infrastructure"],
+  "ats_exact_phrases": ["Espresso", "XCUITest", "GitHub Actions"],
+  "company_value_signals": ["quality gates", "testing culture"]
+}

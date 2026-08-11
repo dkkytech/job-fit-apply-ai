@@ -1,0 +1,80 @@
+# Synthetic e2e candidate — committed fixture, NEVER real data.
+# Structure mirrors resume.template.yaml. The canned LLM responses under llm/ are
+# coupled to this content through the tailor gates (anti-parrot trigrams vs `summary`,
+# never-claim/unsupported leak scan vs all rendered text) — change them together.
+
+demographics:
+  first_name: Alex
+  last_name: Winters
+  email: alex.winters@example.test
+  phone: 555-010-2000
+  location: Denver, CO
+  postal_code: "80201"
+  linkedin_url: null
+  github_url: null
+  portfolio_url: null
+  website_url: null
+
+# NB: the canned llm/summary.txt must not share word-trigrams with this text
+# (anti-parrot gate, >0.5 containment triggers a retry).
+summary: >
+  Senior engineer with nine years of experience building mobile test automation,
+  specialising in device-farm infrastructure and release quality gates, targeting
+  staff-level quality engineering roles.
+
+experience:
+  - role: Senior Software Engineer in Test
+    company: NovaPay
+    location: Denver, CO
+    start: 2021-04
+    end: null
+    bullets:
+      - category: Frameworks
+        text: >
+          Built the Android UI automation framework on Espresso covering 340 scenarios,
+          cutting release regression from three days to six hours.
+      - category: Infrastructure
+        text: >
+          Stood up a Firebase Test Lab device matrix of 24 configurations wired into
+          GitHub Actions, catching 95% of device-specific defects before release.
+
+  - role: Software Engineer in Test
+    company: Harborline Systems
+    location: Boulder, CO
+    start: 2017-06
+    end: 2021-03
+    bullets:
+      - category: Delivery
+        text: >
+          Automated the REST API regression suite to 1,200 checks in Kotlin, halving
+          escaped defects across four backend services.
+
+projects: []
+
+education:
+  - degree: Bachelor of Science
+    field: Computer Science
+    school: Ridgeline State University
+    location: Fort Collins, CO
+    year: 2015
+
+skills:
+  - label: Languages
+    items:
+      - Kotlin
+      - Swift
+      - Python
+  - label: Test Automation
+    items:
+      - Espresso
+      - XCUITest
+      - Appium
+  - label: CI & Infrastructure
+    items:
+      - GitHub Actions
+      - Bitrise
+      - Firebase Test Lab
+  - label: Observability
+    items:
+      - Datadog
+      - Grafana

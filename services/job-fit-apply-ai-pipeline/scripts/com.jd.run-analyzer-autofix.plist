@@ -41,13 +41,15 @@
         <string>--autofix</string>
     </array>
 
-    <!-- Uncomment to ARM the loop (default: off/no-op):
     <key>EnvironmentVariables</key>
     <dict>
         <key>RUN_ANALYZER_AUTOFIX</key>
         <string>1</string>
+        <key>RUN_ANALYZER_AUTOFIX_SEVERITY</key>
+        <string>medium</string>
+        <key>RUN_ANALYZER_AUTOFIX_GATE</key>
+        <string>cd services/job-fit-apply-ai-pipeline &amp;&amp; ./gradlew test</string>
     </dict>
-    -->
 
     <key>StartCalendarInterval</key>
     <dict>

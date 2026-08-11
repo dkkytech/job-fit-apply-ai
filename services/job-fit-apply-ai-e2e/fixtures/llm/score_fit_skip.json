@@ -1,0 +1,8 @@
+{
+  "fit_score": 42,
+  "recommendation": "skip",
+  "rationale": "The role does not match the candidate's senior automation and platform background.",
+  "matched_skills": ["quality assurance"],
+  "missing_skills": ["mobile automation", "CI/CD", "API automation", "test infrastructure"],
+  "hard_gate_failures": []
+}

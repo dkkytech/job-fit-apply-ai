@@ -88,7 +88,9 @@ every-other-day (60/mo) or trim `DEFAULT_LIST` to one config (2 calls/run → 60
 **Healthcheck:** a cheap `CMD-SHELL` mtime check on `$HEARTBEAT_FILE` (window >24h, e.g. 26h) — NOT a
 `--health` JVM exec.
 
-**State volume:** small RW bind mount `${JD_JSEARCH_STATE_HOST:-${HOME}/.openclaw/jd-jsearch-state}:/state`.
+**State volume:** small RW bind mount at `/state`, with its host source now derived from
+`JFAA_DATA_ROOT` (or `JD_JSEARCH_STATE_HOST` for a service-specific compatibility override). See
+`docs/data-root-migration.md` for the current deployment procedure.
 
 ### Image + Compose
 - `Dockerfile` — lean JRE (no browser), `HEALTHCHECK` execs `--health` (heartbeat window >24h, e.g.

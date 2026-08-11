@@ -1,0 +1,1 @@
+ATS_REFINED_MARKER: Staff-level test engineering leader who builds reliable mobile and API automation, paved-road CI/CD systems, and observable quality platforms.

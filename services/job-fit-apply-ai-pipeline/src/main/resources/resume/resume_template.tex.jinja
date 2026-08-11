@@ -22,7 +22,6 @@
 \usepackage{titlesec}
 \usepackage{tabularx}
 \usepackage{setspace}
-\usepackage{ragged2e}
 \usepackage[none]{hyphenat} % disable automatic hyphenation (matches the HTML's default un-hyphenated wrapping)
 \usepackage[hidelinks]{hyperref}
 \usepackage{fancyhdr}
@@ -44,7 +43,7 @@
 \setstretch{1.15}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{8pt}
-\hfuzz=1in % silence harmless overfull-hbox warnings from ragged, non-hyphenated text
+\hfuzz=2pt % small slack only; real overflow should still surface as a build warning
 
 \titleformat{\section}
   {\robotolight\fontsize{18}{18}\selectfont\color{black}}
@@ -67,7 +66,10 @@
 \newcommand{\sep}{\hspace{7.5pt}\textcolor{spacergray}{|}\hspace{7.5pt}}
 
 \begin{document}
-\RaggedRight
+% Plain \raggedright (infinite \rightskip stretch), NOT ragged2e's \RaggedRight:
+% ragged2e uses a finite stretch, so with hyphenation disabled TeX will accept
+% overfull lines that run into the right margin rather than breaking early.
+\raggedright
 
 % ---------------- Header ----------------
 \begin{center}

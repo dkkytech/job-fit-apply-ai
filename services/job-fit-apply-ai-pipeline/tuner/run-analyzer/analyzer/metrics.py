@@ -6,6 +6,9 @@ comparison across variable-size cursor windows stays meaningful (Phase 2).
 """
 
 
+from analyzer.sources import is_thin_digest
+
+
 def _has(rec, *subs):
     e = (rec.get("error") or "").lower()
     return any(s in e for s in subs)
@@ -30,9 +33,7 @@ def compute_metrics(recs):
     zero_score = sum(
         1 for r in recs if (r.get("score", 0) or 0) == 0 and not r.get("isDuplicate")
     )
-    thin_digest = sum(
-        1 for r in recs if r.get("isDigest") and (r.get("jdTextLen", 0) or 0) < 400
-    )
+    thin_digest = sum(1 for r in recs if is_thin_digest(r))
 
     m = {
         "jobs": jobs,

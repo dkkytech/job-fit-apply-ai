@@ -26,7 +26,15 @@ import java.time.Instant
 object RunReport {
     private val mapper = ObjectMapper().registerKotlinModule()
 
-    private val path: Path by lazy { Config.OUTPUT_DIR.resolve("runs").resolve("run_log.jsonl") }
+    private val defaultPath: Path by lazy { Config.OUTPUT_DIR.resolve("runs").resolve("run_log.jsonl") }
+
+    /**
+     * Test seam: redirect the log to a temp file so tests asserting a line was written don't append
+     * to the real run log (which the analyzer reads). Null — the production value — uses [defaultPath].
+     */
+    internal var pathOverride: Path? = null
+
+    private val path: Path get() = pathOverride ?: defaultPath
 
     /**
      * One processed-job record. Field choices are deliberate: `jdTextLen` exposes
@@ -55,9 +63,26 @@ object RunReport {
         // "captured" | "blocked" | "empty" | ""). Lets the analyzer see the HTTP-vs-browser split
         // and confirm the browser path (Steel/CDP) is actually carrying LinkedIn/forced domains.
         val scrapePath: String,
+        // Gmail terminal-label decision ("JD_Processed" | "JD_Processed_Digest" | "JD_Error" |
+        // "JD_Not_Found" | "Recruiter_Response_Required" | null). NOTE this does NOT separate a
+        // digest parent from a digest child — a child inherits the parent's `isDigest` intake, and
+        // TerminalLabel.forState checks isDigest before everything else, so both read
+        // JD_Processed_Digest. Use [pipelineRan] for that.
+        val terminalLabel: String?,
+        // Whether the job ran through ProcessingPipeline (scored/tailored) or went terminal during
+        // the processor's scan/scrape resolve. This is what separates a digest PARENT — which only
+        // fans its children out into their own jobs and is never scored, so its thin jdText is
+        // meaningless — from a digest CHILD, which is a real posting that did reach score_fit.
+        val pipelineRan: Boolean,
     )
 
-    fun record(jobId: String, record: JdRecord, result: ProcessingResult, durationMs: Long) {
+    fun record(
+        jobId: String,
+        record: JdRecord,
+        result: ProcessingResult,
+        durationMs: Long,
+        pipelineRan: Boolean = true,
+    ) {
         try {
             val email = record.intakeMeta as? IntakeContext.Email
             val rec = JobRecord(
@@ -78,6 +103,8 @@ object RunReport {
                 outputPath = result.outputPath,
                 durationMs = durationMs,
                 scrapePath = result.scrapePath,
+                terminalLabel = result.terminalLabel,
+                pipelineRan = pipelineRan,
             )
             Files.createDirectories(path.parent)
             Files.writeString(

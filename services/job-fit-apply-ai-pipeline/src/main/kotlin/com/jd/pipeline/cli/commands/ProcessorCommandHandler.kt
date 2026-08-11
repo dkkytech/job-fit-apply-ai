@@ -2,6 +2,7 @@ package com.jd.pipeline.cli.commands
 
 import com.jd.pipeline.client.BridgeClient
 import com.jd.pipeline.client.ClaimDto
+import com.jd.pipeline.client.SigninServer
 import com.jd.pipeline.client.WorkItemType
 import com.jd.pipeline.config.Config
 import com.jd.pipeline.utils.Heartbeat
@@ -34,6 +35,7 @@ object ProcessorCommandHandler {
         // Messaging (Discord/Telegram) is now a separate Notifier service that consumes the bridge's
         // completed-event stream. The Processor just posts results.
         println("[processor] Starting — polling ${System.getenv("JD_BRIDGE_URL") ?: "http://127.0.0.1:8765"}")
+        startSigninServer()
 
         while (true) {
             // Liveness for the container healthcheck (`--health`). Beats only between jobs, so
@@ -53,34 +55,43 @@ object ProcessorCommandHandler {
                 continue
             }
 
+            // Timed from the moment we own the claim so EVERY terminal outcome — including the
+            // scan/scrape short-circuits below — gets a real durationMs in the run log.
+            val jobStartedAt = System.currentTimeMillis()
+
             // Work-item branch: EMAIL_RAW is scanned/scraped here (digest children re-enqueued);
             // JD_PAGE_RAW (browser extension) is LLM-extracted from captured page text here;
-            // JD_SCRAPED (JSearch / digest child) goes straight to processing.
-            val jdRecord: JdRecord
-            when (claimed.type) {
-                WorkItemType.EMAIL_RAW -> {
-                    val resolved = resolveEmail(claimed, bridge, ingestion)
-                    if (resolved == null) continue   // terminal (digest/non-job/error) already completed
-                    jdRecord = resolved
+            // JD_SCRAPED (JSearch / digest child) goes straight to processing. A branch that
+            // terminates here (digest/non-job/error) is recorded to the run log before we `continue`,
+            // so the analyzer never loses a completed job.
+            val jdRecord: JdRecord = when (claimed.type) {
+                WorkItemType.EMAIL_RAW -> when (val r = resolveEmail(claimed, bridge, ingestion)) {
+                    is Resolution.Proceed  -> r.jdRecord
+                    is Resolution.Terminal -> { recordTerminal(claimed.jobId, r, jobStartedAt); continue }
                 }
-                WorkItemType.JD_PAGE_RAW -> {
-                    val resolved = resolvePageCapture(claimed, bridge, ingestion)
-                    if (resolved == null) continue   // not a job / extraction failed — already completed
-                    jdRecord = resolved
+                WorkItemType.JD_PAGE_RAW -> when (val r = resolvePageCapture(claimed, bridge, ingestion)) {
+                    is Resolution.Proceed  -> r.jdRecord
+                    is Resolution.Terminal -> { recordTerminal(claimed.jobId, r, jobStartedAt); continue }
                 }
                 else -> {
                     val rec = claimed.jdRecord
                     if (rec == null) {
-                        System.err.println("[processor] claim ${claimed.jobId} (${claimed.type}) has no jd_record — skipping")
+                        // Must POST a result, not just `continue`: a bare skip leaves the bridge row
+                        // CLAIMED, so the stale-claim sweep re-queues it and we spin on it forever.
+                        System.err.println("[processor] claim ${claimed.jobId} (${claimed.type}) has no jd_record — failing it")
+                        val terminal = postTerminal(
+                            bridge, claimed, emptyLogRecord(IngestionSource.MANUAL),
+                            skipResult("${claimed.type} claim has no jd_record", TerminalLabel.JD_ERROR),
+                        )
+                        recordTerminal(claimed.jobId, terminal, jobStartedAt)
                         continue
                     }
-                    jdRecord = rec
+                    rec
                 }
             }
 
             println("[processor] Processing job ${claimed.jobId} — ${jdRecord.roleTitle} @ ${jdRecord.company}")
 
-            val jobStartedAt = System.currentTimeMillis()
             val result: ProcessingResult = try {
                 pipeline.invoke(jdRecord)
             } catch (e: Exception) {
@@ -97,6 +108,9 @@ object ProcessorCommandHandler {
                     company        = jdRecord.company,
                     roleTitle      = jdRecord.roleTitle,
                     jobUrl         = jdRecord.jobUrl,
+                    // …and how its JD was fetched, so a pipeline crash still tells the analyzer
+                    // whether the browser backend was involved.
+                    scrapePath     = jdRecord.scrapePath,
                 )
             }
 
@@ -111,12 +125,12 @@ object ProcessorCommandHandler {
                     }
                 }
                 if (files.isNotEmpty()) bridge.uploadArtifacts(claimed.jobId, files)
-                bridge.postResult(claimed.jobId, result)
+                bridge.postResult(claimed.jobId, result, claimed.claimToken)
                 println("[processor] Job ${claimed.jobId} complete — ${result.pipelineAction}, score=${result.fitScore}")
             } catch (e: Exception) {
                 System.err.println("[processor] Failed to post result for ${claimed.jobId}: ${e.message}")
                 runCatching {
-                    bridge.postResult(claimed.jobId, result.copy(error = "Failed to post result: ${e.message}"))
+                    bridge.postResult(claimed.jobId, result.copy(error = "Failed to post result: ${e.message}"), claimed.claimToken)
                 }
             }
 
@@ -128,15 +142,145 @@ object ProcessorCommandHandler {
     }
 
     /**
-     * Scan/scrape a claimed raw email into a [JdRecord] to process. Returns null when the item
-     * is terminal here — digest (children re-enqueued as JD_SCRAPED), not-a-job, or an ingestion
-     * error — in which case the bridge job has already been completed via postResult.
+     * Bring up the tap-to-sign-in endpoint ([SigninServer]) alongside the loop, so a re-auth alert
+     * can link to something that still works when the user taps it minutes or hours later.
+     *
+     * Gated on STEEL_SIGNIN_PUBLIC_URL: unset (the default) means the endpoint is neither advertised
+     * in alerts nor started, so this is a no-op unless it has been deliberately configured. Failure
+     * to bind is logged, not fatal — job processing is the Processor's actual job, and it must not
+     * fail to start because a convenience port is taken.
      */
-    private fun resolveEmail(claimed: ClaimDto, bridge: BridgeClient, ingestion: IngestionPipeline): JdRecord? {
+    private fun startSigninServer() {
+        if (Config.STEEL_SIGNIN_PUBLIC_URL.isBlank()) return
+        if (Config.STEEL_BASE_URL.isBlank()) {
+            println("[processor] Sign-in endpoint not started — STEEL_BASE_URL is unset (Steel disabled).")
+            return
+        }
+        runCatching { SigninServer().start() }
+            .onFailure { System.err.println("[processor] Sign-in endpoint failed to start: ${it.message}") }
+    }
+
+    /**
+     * Outcome of resolving a claim into something processable. [Proceed] carries the [JdRecord] to
+     * run through [ProcessingPipeline]; [Terminal] means the claim is already done here (digest
+     * fan-out, not-a-job, or an ingestion/extraction error) — the result has been posted and the
+     * [jdRecord]/[result] are carried back so the loop can write the run-log line.
+     */
+    private sealed interface Resolution {
+        data class Proceed(val jdRecord: JdRecord) : Resolution
+        data class Terminal(val jdRecord: JdRecord, val result: ProcessingResult) : Resolution
+    }
+
+    /**
+     * Append the run-log line for a terminal-at-resolve outcome (skip/error/digest). `pipelineRan
+     * = false` marks it as never having reached [ProcessingPipeline] — the signal the run-analyzer
+     * uses to tell a digest PARENT (fanned out here) from a digest CHILD that was really scored.
+     */
+    private fun recordTerminal(jobId: String, terminal: Resolution.Terminal, jobStartedAt: Long) {
+        com.jd.pipeline.utils.RunReport.record(
+            jobId, terminal.jdRecord, terminal.result, System.currentTimeMillis() - jobStartedAt,
+            pipelineRan = false,
+        )
+    }
+
+    /**
+     * Post a terminal result and package it (with a record for the run log) as a [Resolution].
+     * A failed post is logged, not thrown: the bridge being briefly unreachable must not take the
+     * whole processor loop down, and the run-log line is still worth writing (the stale-claim sweep
+     * re-queues the job, and [com.jd.pipeline.utils.RunReport] keeps the last line per job id).
+     */
+    private fun postTerminal(
+        bridge: BridgeClient,
+        claimed: ClaimDto,
+        record: JdRecord,
+        result: ProcessingResult,
+    ): Resolution.Terminal {
+        // The claim carries the fence: a terminal posted after this claim was requeued and
+        // re-claimed is refused by the bridge rather than overwriting its replacement.
+        runCatching { bridge.postResult(claimed.jobId, result, claimed.claimToken) }
+            .onFailure { System.err.println("[processor] Failed to post terminal result for ${claimed.jobId}: ${it.message}") }
+        return Resolution.Terminal(record, result)
+    }
+
+    /** What one digest fan-out achieved. [failed] is empty exactly when every child is accounted for. */
+    private data class FanOutReport(
+        val total: Int,
+        val queued: List<String> = emptyList(),
+        val deduped: List<String> = emptyList(),
+        val failed: List<String> = emptyList(),
+    ) {
+        override fun toString() =
+            "$total child(ren): ${queued.size} queued, ${deduped.size} already present, ${failed.size} failed"
+    }
+
+    /**
+     * Submit every discovered child, giving each a **stable** idempotency key derived from the
+     * parent message. Without one, a retried digest re-queues children that already exist: the
+     * bridge can only dedupe on job_url, and a child extracted from inline text has none.
+     *
+     * The key prefers the child's URL over its position, because a re-scan of the same digest can
+     * legitimately return the children in a different order — an index-only key would then map the
+     * same posting to a different identity and duplicate it.
+     */
+    private fun submitDigestChildren(
+        children: List<JDState>,
+        parentMessageId: String,
+        bridge: BridgeClient,
+        ingestion: IngestionPipeline,
+    ): FanOutReport {
+        val queued = mutableListOf<String>()
+        val deduped = mutableListOf<String>()
+        val failed = mutableListOf<String>()
+        children.forEachIndexed { index, child ->
+            val identity = child.jobUrl.ifBlank { "#$index" }
+            val key = "$parentMessageId|$identity"
+            // Everything inside the try: an `onSuccess` block runs *outside* runCatching's
+            // protection, so a throw while classifying the outcome would escape and kill the
+            // processor loop — losing not just this child but the parent's terminal result.
+            try {
+                val outcome = bridge.submitDetailed(ingestion.toJdRecord(child, idempotencyKey = key))
+                if (outcome.deduped) deduped += key else queued += key
+            } catch (e: Exception) {
+                System.err.println("[processor] digest child submit failed ($key): ${e.message}")
+                failed += "$key: ${e.message}"
+            }
+        }
+        return FanOutReport(children.size, queued, deduped, failed)
+    }
+
+    /**
+     * A JdRecord built straight from ingestion [state] (NOT via the pipeline's toJdRecord) purely so
+     * a terminal outcome carries enough identity — company/role/jobUrl/jd-length/intake — for the
+     * run log. Reading state fields directly keeps this independent of any mapping mock.
+     */
+    private fun logRecordOf(state: JDState, source: IngestionSource): JdRecord = JdRecord(
+        jdText     = state.jdText,
+        company    = state.company.ifBlank { null },
+        roleTitle  = state.roleTitle.ifBlank { null },
+        location   = state.location.ifBlank { null },
+        jobUrl     = state.jobUrl.ifBlank { null },
+        source     = source,
+        intakeMeta = state.intake,
+    )
+
+    /** A bare JdRecord for a terminal claim we couldn't resolve at all (missing payload). */
+    private fun emptyLogRecord(source: IngestionSource): JdRecord = JdRecord(
+        jdText = "", company = null, roleTitle = null, location = null, jobUrl = null, source = source,
+    )
+
+    /**
+     * Scan/scrape a claimed raw email into a [Resolution]. [Resolution.Terminal] when the item ends
+     * here — digest (children re-enqueued as JD_SCRAPED), not-a-job, or an ingestion error — in which
+     * case the bridge job has been completed via postResult and the run-log line is written by the
+     * caller. [Resolution.Proceed] carries the record to run through [ProcessingPipeline].
+     */
+    private fun resolveEmail(claimed: ClaimDto, bridge: BridgeClient, ingestion: IngestionPipeline): Resolution {
         val email = claimed.email
         if (email == null) {
-            bridge.postResult(claimed.jobId, skipResult("EMAIL_RAW claim missing email payload", TerminalLabel.JD_ERROR))
-            return null
+            return postTerminal(
+                bridge, claimed, emptyLogRecord(IngestionSource.EMAIL),
+                skipResult("EMAIL_RAW claim missing email payload", TerminalLabel.JD_ERROR),
+            )
         }
         val emailState = JDState(
             intake = IntakeContext.Email(
@@ -154,8 +298,10 @@ object ProcessorCommandHandler {
             ingestion.invoke(emailState)   // scan → digest fan-out → scrape
         } catch (e: Exception) {
             System.err.println("[processor] ingestion failed for ${claimed.jobId}: ${e.message}")
-            bridge.postResult(claimed.jobId, skipResult("ingestion: ${e.message}", TerminalLabel.JD_ERROR))
-            return null
+            return postTerminal(
+                bridge, claimed, logRecordOf(emailState, IngestionSource.EMAIL),
+                skipResult("ingestion: ${e.message}", TerminalLabel.JD_ERROR),
+            )
         }
 
         return when (val disposition = EmailResolution.classify(ingState)) {
@@ -165,23 +311,45 @@ object ProcessorCommandHandler {
                 // "not found" silently drops it (the intake query excludes JD_Not_Found) and the
                 // user has no signal it needs a retry.
                 System.err.println("[processor] ingestion error for ${claimed.jobId}: ${disposition.message}")
-                bridge.postResult(claimed.jobId, skipResult(disposition.message, TerminalLabel.JD_ERROR))
-                null
+                postTerminal(
+                    bridge, claimed, logRecordOf(ingState, IngestionSource.EMAIL),
+                    skipResult(disposition.message, TerminalLabel.JD_ERROR, ingState.scrapePath),
+                )
             }
             is EmailDisposition.ReEnqueueChildren -> {
-                for (child in disposition.children) {
-                    runCatching { bridge.submit(ingestion.toJdRecord(child)) }
-                        .onFailure { System.err.println("[processor] digest child submit failed: ${it.message}") }
+                val fanOut = submitDigestChildren(disposition.children, email.messageId, bridge, ingestion)
+                println("[processor] digest ${claimed.jobId} fan-out: $fanOut")
+                if (fanOut.failed.isEmpty()) {
+                    // parent digest complete → archive
+                    postTerminal(
+                        bridge, claimed, logRecordOf(ingState, IngestionSource.EMAIL),
+                        skipResult(null, TerminalLabel.JD_PROCESSED_DIGEST, ingState.scrapePath),
+                    )
+                } else {
+                    // A digest whose children did not all land is NOT "processed". Reporting
+                    // success here is how siblings get silently lost: the parent is archived, the
+                    // failed children exist nowhere, and nothing is left to retry from. JD_Error
+                    // keeps it visible and retryable — and because children carry stable
+                    // idempotency keys, the retry re-submits only what is missing.
+                    postTerminal(
+                        bridge, claimed, logRecordOf(ingState, IngestionSource.EMAIL),
+                        skipResult(
+                            "digest fan-out incomplete: ${fanOut.failed.size} of ${fanOut.total} children " +
+                                "failed to enqueue (${fanOut.failed.joinToString("; ")})",
+                            TerminalLabel.JD_ERROR,
+                            ingState.scrapePath,
+                        ),
+                    )
                 }
-                bridge.postResult(claimed.jobId, skipResult(null, TerminalLabel.JD_PROCESSED_DIGEST))   // parent digest complete → archive
-                null
             }
-            EmailDisposition.SkipNotJob -> {
-                bridge.postResult(claimed.jobId, skipResult(null, TerminalLabel.JD_NOT_FOUND))   // not a job posting
-                null
-            }
+            EmailDisposition.SkipNotJob ->
+                // not a job posting
+                postTerminal(
+                    bridge, claimed, logRecordOf(ingState, IngestionSource.EMAIL),
+                    skipResult(null, TerminalLabel.JD_NOT_FOUND, ingState.scrapePath),
+                )
             EmailDisposition.Process ->
-                ingestion.toJdRecord(ingState, idempotencyKey = email.messageId)
+                Resolution.Proceed(ingestion.toJdRecord(ingState, idempotencyKey = email.messageId))
         }
     }
 
@@ -189,13 +357,16 @@ object ProcessorCommandHandler {
      * LLM-extract a JD from a claimed raw page capture into a [JdRecord] to process. The page was
      * rendered in the user's authenticated browser, so [ScrapeJdNode] skips fetching and extracts
      * straight from the captured text. Returns null when the page isn't a job posting or extraction
-     * fails — in which case the bridge job has already been completed via postResult (a SKIP).
+     * fails — in which case the bridge job has already been completed via postResult (a SKIP) and
+     * the caller writes the run-log line from the returned [Resolution.Terminal].
      */
-    private fun resolvePageCapture(claimed: ClaimDto, bridge: BridgeClient, ingestion: IngestionPipeline): JdRecord? {
+    private fun resolvePageCapture(claimed: ClaimDto, bridge: BridgeClient, ingestion: IngestionPipeline): Resolution {
         val cap = claimed.pageCapture
         if (cap == null) {
-            bridge.postResult(claimed.jobId, skipResult("JD_PAGE_RAW claim missing page payload"))
-            return null
+            return postTerminal(
+                bridge, claimed, emptyLogRecord(IngestionSource.EXTENSION),
+                skipResult("JD_PAGE_RAW claim missing page payload"),
+            )
         }
         val state = JDState(
             intake       = IntakeContext.WebCapture(url = cap.url, title = cap.title),
@@ -206,29 +377,38 @@ object ProcessorCommandHandler {
             ingestion.scrapeNode.process(state)   // dual-mode: extracts from capturedText, no fetch
         } catch (e: Exception) {
             System.err.println("[processor] page extraction failed for ${claimed.jobId}: ${e.message}")
-            bridge.postResult(claimed.jobId, skipResult("extraction: ${e.message}"))
-            return null
+            return postTerminal(
+                bridge, claimed, logRecordOf(state, IngestionSource.EXTENSION),
+                skipResult("extraction: ${e.message}"),
+            )
         }
 
         // The scrape prompt has no explicit is-job flag, so gate on the load-bearing jd_text:
         // if the LLM couldn't extract a usable JD, treat the page as "not a job posting".
         if (extracted.error.isNotBlank() || extracted.jdText.length < 150) {
-            bridge.postResult(
-                claimed.jobId,
-                skipResult("This page doesn't look like a job posting (no JD could be extracted)"),
+            return postTerminal(
+                bridge, claimed, logRecordOf(extracted, IngestionSource.EXTENSION),
+                skipResult(
+                    "This page doesn't look like a job posting (no JD could be extracted)",
+                    scrapePath = extracted.scrapePath,
+                ),
             )
-            return null
         }
 
-        return JdRecord(
-            jdText         = extracted.jdText,
-            company        = extracted.company.ifBlank { null },
-            roleTitle      = extracted.roleTitle.ifBlank { null },
-            location       = extracted.location.ifBlank { null },
-            jobUrl         = extracted.jobUrl.ifBlank { null },
-            source         = IngestionSource.EXTENSION,
-            idempotencyKey = cap.url,
-            intakeMeta     = extracted.intake,
+        return Resolution.Proceed(
+            JdRecord(
+                jdText         = extracted.jdText,
+                company        = extracted.company.ifBlank { null },
+                roleTitle      = extracted.roleTitle.ifBlank { null },
+                location       = extracted.location.ifBlank { null },
+                jobUrl         = extracted.jobUrl.ifBlank { null },
+                source         = IngestionSource.EXTENSION,
+                idempotencyKey = cap.url,
+                intakeMeta     = extracted.intake,
+                // Rendered in the user's own browser, so this is the "captured" path — recording it
+                // keeps extension traffic distinguishable from a backend scrape in the run_log.
+                scrapePath     = extracted.scrapePath,
+            ),
         )
     }
 
@@ -240,7 +420,11 @@ object ProcessorCommandHandler {
      * written-back job) and re-labeled JD_Processing forever. The Poller reads message_id from the
      * bridge row, which preserves the enqueue-time value, so this result need not repeat it.
      */
-    private fun skipResult(error: String?, terminalLabel: String? = null): ProcessingResult = ProcessingResult(
+    private fun skipResult(
+        error: String?,
+        terminalLabel: String? = null,
+        scrapePath: String = "",
+    ): ProcessingResult = ProcessingResult(
         pipelineAction = PipelineAction.SKIP.name,
         fitScore       = 0,
         strengths      = emptyList(),
@@ -249,5 +433,9 @@ object ProcessorCommandHandler {
         hasCoverLetter = false,
         error          = error,
         terminalLabel  = terminalLabel,
+        // These items never reach ProcessingPipeline, so nothing else can record how their JD text
+        // was fetched. A scrape that FAILED terminates right here — exactly the case the analyzer
+        // most needs — so an empty scrapePath would hide browser-backend problems entirely.
+        scrapePath     = scrapePath,
     )
 }

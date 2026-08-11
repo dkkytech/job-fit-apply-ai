@@ -68,6 +68,22 @@ class ProcessingPipelineTest {
     }
 
     @Test
+    @DisplayName("invoke surfaces the record's scrapePath into the result, even on an early SKIP")
+    fun invokeCarriesScrapePathIntoResult() {
+        // Second half of the ingestion → run_log chain. Processing never scrapes, so it must pass
+        // the ingestion-side value straight through; it previously seeded the JDState default ("")
+        // and overwrote it, which is what blanked scrapePath for every logged job. Asserted on a
+        // failure path too, because that is exactly where a browser problem shows up.
+        val pipeline = ProcessingPipeline()
+        injectNode(pipeline, "checkDuplicate", Node { _ -> throw RuntimeException("boom") })
+
+        val result = pipeline.invoke(minimalRecord().copy(scrapePath = "cdp_fallback"))
+
+        assertEquals("SKIP", result.pipelineAction)
+        assertEquals("cdp_fallback", result.scrapePath)
+    }
+
+    @Test
     @DisplayName("invoke returns SKIP with error when scoreFit throws")
     fun invokeCatchesScoreFitException() {
         val pipeline = ProcessingPipeline()

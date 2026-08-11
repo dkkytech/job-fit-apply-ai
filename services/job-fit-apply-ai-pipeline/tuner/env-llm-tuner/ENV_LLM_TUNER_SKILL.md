@@ -22,13 +22,11 @@ overwritten the next time the skill executes.
 |--------------------------|-----------------------------------------------------------------|------|-------|-------------|-----------------------|
 | `SCAN_MODEL`             | ScanEmailNode, LlmDigestStrategy                                | 0.0  | yes   | no          | 200–400               |
 | `SCRAPE_MODEL`           | ScrapeJdNode (defaults to SCAN_MODEL)                           | 0.0  | yes   | no          | 300–600               |
-| `SCORE_MODEL`            | ScoreFitNode, JdExtractionNode, GapAnalysisNode, AtsScoringNode | 0.0  | yes   | no          | 400–900               |
+| `SCORE_MODEL`            | ScoreFitNode, JdExtractionNode, GapAnalysisNode, AtsValidationNode | 0.0  | yes   | no          | 400–900               |
 | `RESUME_REASONING_MODEL` | SummaryRewriteNode, BulletRewriteNode                           | 0.25 | mixed | qwen3 /no_think | 300–800           |
 | `SKILLS_MODEL`           | SkillsRestructureNode (defaults to RESUME_REASONING_MODEL)      | 0.2  | yes   | no          | 200–500               |
 | `COVER_LETTER_MODEL`     | GenerateCoverLetterNode                                         | 0.4  | no    | no          | 300–600               |
 | `DRAFT_REPLY_MODEL`      | DraftReplyComposer                                             | 0.3  | no    | no          | 100–200               |
-| `RESUME_GEN_MODEL`       | GenerateResumeHtmlNode                                          | 0.0  | no    | no          | 1500–4000             |
-| `PROFILE_GEN_MODEL`      | GenerateCandidateProfileNode (defaults to RESUME_GEN_MODEL)     | 0.0  | yes   | no          | 200–800               |
 
 ### Per-node task descriptions
 
@@ -43,7 +41,8 @@ overwritten the next time the skill executes.
 
 - **SCORE_MODEL**: The most critical node. Combined call: (1) rubric-based
   fit-scoring 0–100 with chain-of-thought reasoning, and (2) structured JD
-  extraction. Also drives JdExtractionNode, GapAnalysisNode, AtsScoringNode.
+  extraction. Also drives JdExtractionNode, GapAnalysisNode, AtsValidationNode
+  (those three via `orchestrationClient`; ScoreFitNode via `fromModelString`).
   All temp=0, JSON required. Accuracy determines whether a job is processed.
   Reasoning depth beats raw speed here.
 
@@ -70,17 +69,12 @@ overwritten the next time the skill executes.
   Speed matters; deep reasoning does not. Driven by `DraftReplyComposer` (the
   LLM/templating half of the former `CreateDraftReplyNode`, since split).
 
-- **RESUME_GEN_MODEL**: Converts a DOCX or PDF resume into styled HTML by filling
-  the project's base_resume.html template. Input: template HTML + plain-text source;
-  output: a complete HTML document (~1500–4000 tokens). Strict structure-following
-  is the key metric — the CSS block must not change. temp=0.0, jsonMode=false,
-  thinking disabled. Long-context support helps (template + source can be 8k–20k tokens).
+### Removed nodes
 
-- **PROFILE_GEN_MODEL**: Parses a candidate's resume (PDF, DOCX, HTML, MD) into a
-  structured `CandidateProfile` JSON. One-shot onboarding call (`--init-profile` only);
-  strict JSON at temp=0, no thinking. Strong instruction-following and JSON schema
-  adherence are the key metrics. Long-context support helps (multi-page resumes).
-  Defaults to RESUME_GEN_MODEL if not set.
+- **RESUME_GEN_MODEL** and **PROFILE_GEN_MODEL** are no longer pipeline config
+  vars. Resume HTML is rendered deterministically from `resume.yaml` (no LLM),
+  and the candidate profile is authored as structured YAML. The nodes
+  `GenerateResumeHtmlNode` and `GenerateCandidateProfileNode` are gone.
 
 ### Backend routing rules (auto-updated from LlmClient.kt)
 
@@ -274,22 +268,44 @@ ENV_LLM_TUNER_SKILL.md updated: N changes.   (or "unchanged.")
 
 If nothing changed, print `Self-Scan: pipeline unchanged.` and skip to Section D.
 
-## Self-Scan Changelog (2026-07-05 run, Opus — deep re-scan)
+## Self-Scan Changelog (2026-07-18 run)
 - [MATCH]   SCAN_MODEL: ScanEmailNode, LlmDigestStrategy (fromModelString, temp 0.0, jsonMode true)
-- [MATCH]   SCRAPE_MODEL: ScrapeJdNode (fromModelString, temp 0.0, jsonMode true)
-- [MATCH]   SCORE_MODEL: ScoreFitNode, JdExtractionNode, GapAnalysisNode, AtsScoringNode (orchestrationClient, temp 0.0)
-- [CHANGED] RESUME_REASONING_MODEL: temp 0.4 → 0.25 in Section A table + per-node desc
-            (reasoningClient LlmClient.kt:321 lowered to cut drift/fabrication on dense-local)
+- [MATCH]   SCRAPE_MODEL: ScrapeJdNode (fromModelString, temp 0.0, jsonMode true; defaults to SCAN_MODEL)
+- [CHANGED] SCORE_MODEL: node class `AtsScoringNode` → **`AtsValidationNode`**
+            (AtsValidationNode.kt:28, `orchestrationClient`, nodeKey still "ats_scoring").
+            Driver unchanged: SCORE_MODEL, temp 0.0, jsonMode true, thinking off.
+            ScoreFitNode / JdExtractionNode / GapAnalysisNode unchanged.
+- [MATCH]   RESUME_REASONING_MODEL: SummaryRewriteNode, BulletRewriteNode (reasoningClient, temp 0.25;
+            BulletRewriteNode overrides timeoutSeconds=480 for the large array output)
 - [MATCH]   SKILLS_MODEL: SkillsRestructureNode (skillsClient, temp 0.2, jsonMode true)
 - [MATCH]   COVER_LETTER_MODEL: GenerateCoverLetterNode (fromModelString, temp 0.4, jsonMode false)
-- [CHANGED] DRAFT_REPLY_MODEL: node class CreateDraftReplyNode → DraftReplyComposer
-            (node split; DraftReplyComposer is "the LLM/templating half of the old CreateDraftReplyNode")
-- [MATCH]   RESUME_GEN_MODEL: GenerateResumeHtmlNode (fromModelString, temp 0.0, jsonMode false)
-- [MATCH]   PROFILE_GEN_MODEL: GenerateCandidateProfileNode (fromModelString, temp 0.0, jsonMode true)
+- [MATCH]   DRAFT_REPLY_MODEL: DraftReplyComposer (fromModelString, temp 0.3, jsonMode false)
+- [MATCH]   RESUME_GEN_MODEL / PROFILE_GEN_MODEL: remain absent from Config.kt (removed 2026-07-16).
+Backend enum (MLX_LOCAL, OLLAMA_LOCAL, OLLAMA_CLOUD, DEEPSEEK_CLOUD, MINIMAX_CLOUD) and
+backendFor() routing (LlmClient.kt:382-391) verified unchanged vs the routing-rules table.
+Section A2 re-verified against tuner/run-analyzer/analyzer/llm.py:29 — still oMLX-local /
+`:ollama-cloud` / `:ollama-local` only, no `:cloud`. Unchanged.
+NOTE: Config.kt:91 still comments "Creative (temp=0.4)" for RESUME_REASONING, but
+reasoningClient uses 0.25 (LlmClient.kt:321). Stale source comment only — no behaviour impact.
+ENV_LLM_TUNER_SKILL.md updated: 1 change (SCORE_MODEL node-class rename).
+
+## Self-Scan Changelog (2026-07-16 run, superseded)
+- [MATCH]   SCAN_MODEL: ScanEmailNode, LlmDigestStrategy (fromModelString, temp 0.0, jsonMode true)
+- [MATCH]   SCRAPE_MODEL: ScrapeJdNode (fromModelString, temp 0.0, jsonMode true)
+- [MATCH]   SCORE_MODEL: ScoreFitNode, JdExtractionNode, GapAnalysisNode, AtsScoringNode
+            (ScoreFitNode now uses fromModelString instead of orchestrationClient —
+             functionally equivalent: temp 0.0, jsonMode true, thinking disabled)
+- [MATCH]   RESUME_REASONING_MODEL: SummaryRewriteNode, BulletRewriteNode (reasoningClient, temp 0.25)
+- [MATCH]   SKILLS_MODEL: SkillsRestructureNode (skillsClient, temp 0.2, jsonMode true)
+- [MATCH]   COVER_LETTER_MODEL: GenerateCoverLetterNode (fromModelString, temp 0.4, jsonMode false)
+- [MATCH]   DRAFT_REPLY_MODEL: DraftReplyComposer (fromModelString, temp 0.3, jsonMode false)
+- [REMOVED] RESUME_GEN_MODEL: GenerateResumeHtmlNode — node removed; resume HTML now rendered
+            deterministically from resume.yaml (no LLM). Config.kt line 261-262.
+- [REMOVED] PROFILE_GEN_MODEL: GenerateCandidateProfileNode — node removed; candidate profile
+            now authored as structured YAML (no LLM). Config.kt line 261-262.
 Backend enum (MLX_LOCAL, OLLAMA_LOCAL, OLLAMA_CLOUD, DEEPSEEK_CLOUD, MINIMAX_CLOUD) and
 backendFor() routing verified unchanged vs the routing-rules table.
-NOTE: the prior (Sonnet) run marked all vars MATCH and missed both CHANGED items above.
-ENV_LLM_TUNER_SKILL.md updated: 2 changes (RESUME_REASONING temp, DRAFT_REPLY node name).
+ENV_LLM_TUNER_SKILL.md updated: 2 removals (RESUME_GEN_MODEL, PROFILE_GEN_MODEL).
 
 
 ---
@@ -478,8 +494,6 @@ RESUME_REASONING_MODEL=
 SKILLS_MODEL=
 COVER_LETTER_MODEL=
 DRAFT_REPLY_MODEL=
-RESUME_GEN_MODEL=
-PROFILE_GEN_MODEL=
 RUN_ANALYZER_MODEL=      # analyzer tool (Section A2) — :ollama-cloud or local-oMLX only, never :cloud
 ```
 
@@ -511,14 +525,13 @@ After writing all four files, print:
 | SKILLS_MODEL             | glm-5.1:ollama-cloud | **mlx-community--Qwen3.6-27B-4bit (DENSE)** | Qwen3.6-35B-A3B-OptiQ-4bit (MoE, quality tradeoff) | **mlx-community--Qwen3.6-27B-4bit (DENSE)** |
 | COVER_LETTER_MODEL       | kimi-k2.6:ollama-cloud | gemma-4-12B-it-qat-4bit | gemma-4-12B-it-qat-4bit | gemma-4-12B-it-qat-4bit |
 | DRAFT_REPLY_MODEL        | kimi-k2.6:ollama-cloud | gemma-4-12B-it-qat-4bit | Qwen3.5-9B-OptiQ-4bit | gemma-4-12B-it-qat-4bit |
-| RESUME_GEN_MODEL         | glm-5.1:ollama-cloud | Qwen3-Coder-30B-A3B-…-dwq-v2 | Qwen3-Coder-30B-A3B-…-dwq-v2 | Qwen3-Coder-30B-A3B-…-dwq-v2 |
-| PROFILE_GEN_MODEL        | glm-5.1:ollama-cloud | Qwen3.6-35B-A3B-OptiQ-4bit | Qwen3.5-9B-OptiQ-4bit | Qwen3.6-35B-A3B-OptiQ-4bit |
 | RUN_ANALYZER_MODEL       | deepseek-v4-pro:ollama-cloud | DeepSeek-R1-Distill-Qwen-32B-4bit (audit weaker) | DeepSeek-R1-Distill-Qwen-32B-4bit (audit weaker) | deepseek-v4-pro:ollama-cloud (reuses RESUME slot) |
 | Distinct cloud models    | 4 (glm-5.1, deepseek-v4-pro, deepseek-v4-flash, kimi-k2.6 — analyzer reuses deepseek-v4-pro) — exceeds 3-model cap by design | 0 | 0 | 2 (glm-5.1, deepseek-v4-pro — analyzer REUSES deepseek-v4-pro, 0 extra) |
 | Est. hot-path time       | ~58s         | ~138s              | ~92s                   | ~103s            |
 
 Hot-path = SCAN→SCRAPE→SCORE→RESUME_REASONING→SKILLS→COVER_LETTER→DRAFT_REPLY (one job reaching
-the tailoring subgraph); excludes RESUME_GEN/PROFILE_GEN (off-hot-path, `--resume-gen`/`--init-profile`).
+the tailoring subgraph). RESUME_GEN_MODEL and PROFILE_GEN_MODEL are no longer pipeline vars
+(resume HTML and candidate profile are now produced deterministically, no LLM).
 gemma-4-12B local timings use the corrected ~13.5 tok/s VLM-engine rate (live-measured 2026-07-05),
 not the old ~19 tok/s tiny-prompt figure.
 ```

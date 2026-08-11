@@ -85,6 +85,20 @@ class IngestionPipelineTest {
     }
 
     @Test
+    @DisplayName("toJdRecord carries scrapePath, so browser-scraping health reaches the run_log")
+    fun toJdRecordCarriesScrapePath() {
+        // Regression: scraping happens in ingestion, but the run_log is written from the *processing*
+        // result — and this mapping dropped scrapePath, so ProcessingPipeline re-read the "" default.
+        // Every one of 11,999 logged jobs recorded an empty scrapePath, making the browser backend
+        // invisible to the analyzer exactly when we needed to judge whether Steel was costing scrapes.
+        val pipeline = IngestionPipeline()
+
+        val record = pipeline.toJdRecord(JDState(jdText = "jd", scrapePath = "cdp_forced"))
+
+        assertEquals("cdp_forced", record.scrapePath)
+    }
+
+    @Test
     @DisplayName("toJdRecord maps blank/empty scrape fields to null")
     fun toJdRecordBlankScrapeFieldsToNull() {
         val pipeline = IngestionPipeline()

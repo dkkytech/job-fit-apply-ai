@@ -1,0 +1,1 @@
+Staff-focused quality leader who owns end-to-end release confidence for consumer apps. Designs Kotlin and Espresso frameworks that engineering teams adopt as the paved road, and wires them into GitHub Actions with device coverage from Firebase Test Lab. Known for mentoring engineers while raising the bar on observable, data-driven quality.

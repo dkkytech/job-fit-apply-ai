@@ -11,7 +11,11 @@ services:
     # Swap to pgvector/pgvector:pg16 when you want embeddings/similarity search
     # (semantic job<->resume matching) in the same database — drop-in, no data change.
     image: postgres:16-alpine
-    container_name: jobfit-db
+    # CONTAINER_PREFIX names every container of an instance (kept explicit — doctor.sh,
+    # e2e-smoke.sh and host watchdog tooling reference the names). The default keeps prod
+    # byte-identical; a second instance sets CONTAINER_PREFIX=jobfit-test in its env file.
+    # See docs/multi-instance.md.
+    container_name: ${CONTAINER_PREFIX:-jobfit}-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-jobfit}
@@ -33,7 +37,7 @@ services:
 
   bridge:
     build: ./services/job-fit-apply-ai-bridge
-    container_name: jobfit-bridge
+    container_name: ${CONTAINER_PREFIX:-jobfit}-bridge
     restart: unless-stopped
     depends_on:
       db:
@@ -52,8 +56,10 @@ services:
       # Loopback only; reached over the tailnet via `tailscale serve` (see docs/tailscale-serve.md).
       - "127.0.0.1:${JD_BRIDGE_PORT:-8765}:8765"
     volumes:
-      # Preserve the existing host queue + uploaded artifacts.
-      - "${JD_BRIDGE_STORE_HOST:-${HOME}/.openclaw/jd-bridge}:/data"
+      # Persistent bind-mount root is portable: set JFAA_DATA_ROOT per host (macOS:
+      # ~/Library/Application Support/JFAA; Ubuntu service host: /var/lib/jfaa). The
+      # per-service override remains for exceptional layouts/backward compatibility.
+      - "${JD_BRIDGE_STORE_HOST:-${JFAA_DATA_ROOT:-${HOME}/.local/share/jfaa}/bridge}:/data"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8765/health"]
       interval: 15s
@@ -67,7 +73,7 @@ services:
       args:
         # Baked into the bundle: the bridge URL the browser calls over the tailnet.
         VITE_API_BASE_URL: "${VITE_API_BASE_URL:-http://richards-macbook-m1-max.tail02d0e.ts.net:8765}"
-    container_name: jobfit-frontend
+    container_name: ${CONTAINER_PREFIX:-jobfit}-frontend
     restart: unless-stopped
     ports:
       # Loopback only; reached over the tailnet via `tailscale serve` (docs/tailscale-serve.md).
@@ -81,7 +87,7 @@ services:
 
   markserv:
     build: ./docker/markserv
-    container_name: jobfit-markserv
+    container_name: ${CONTAINER_PREFIX:-jobfit}-markserv
     restart: unless-stopped
     ports:
       # Loopback ONLY — no LAN / 0.0.0.0 exposure. Reached over the tailnet via
@@ -90,8 +96,8 @@ services:
       # tailnet-exposed container (bridge/frontend next): bind 127.0.0.1, front with serve.
       - "127.0.0.1:${MARKSERV_PORT:-8081}:8081"
     volumes:
-      # The pipeline (host, or a container later) writes reports here; markserv only reads.
-      - ./services/job-fit-apply-ai-pipeline/output:/data:ro
+      # Same root-derived host dir Processor writes at /app/output; Markserv only reads.
+      - "${JD_PIPELINE_OUTPUT_HOST:-${JFAA_DATA_ROOT:-${HOME}/.local/share/jfaa}/pipeline-output}:/data:ro"
     healthcheck:
       # 127.0.0.1 (not localhost): markserv binds IPv4 only, and localhost resolves to ::1 first.
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/ || exit 1"]
@@ -102,8 +108,13 @@ services:
 
   poller:
     build: ./services/job-fit-apply-ai-poller
-    container_name: jobfit-poller
+    container_name: ${CONTAINER_PREFIX:-jobfit}-poller
     restart: unless-stopped
+    # Gmail labels are account-global: two pollers on one account race and double-process.
+    # The intake services are therefore profile-gated so a test instance can exclude them
+    # entirely (COMPOSE_PROFILES empty in its env file). Prod must set COMPOSE_PROFILES=intake
+    # in the repo-root .env — a bare `docker compose up` without it silently drops them.
+    profiles: ["intake"]
     depends_on:
       bridge:
         condition: service_healthy
@@ -118,14 +129,17 @@ services:
     volumes:
       # Gmail credentials + token. RW so the ~weekly OAuth refresh persists across restarts.
       # Seed once from the existing token; the container is the sole Gmail owner after cutover.
-      - "${JD_POLLER_SECRETS_HOST:-${HOME}/.openclaw/jd-poller-secrets}:/secrets"
+      - "${JD_POLLER_SECRETS_HOST:-${JFAA_DATA_ROOT:-${HOME}/.local/share/jfaa}/poller-secrets}:/secrets"
     # No ports — the Poller only makes outbound calls (Gmail + bridge). Healthcheck (exec `--health`)
     # is baked into the image.
 
   jsearch:
     build: ./services/job-fit-apply-ai-jsearch
-    container_name: jobfit-jsearch
+    container_name: ${CONTAINER_PREFIX:-jobfit}-jsearch
     restart: unless-stopped
+    # Profile-gated with the poller (see its note): intake runs only where COMPOSE_PROFILES
+    # activates it — prod yes, test instances no (jobs enter test via scripts/replay-jobs.sh).
+    profiles: ["intake"]
     depends_on:
       bridge:
         condition: service_healthy
@@ -139,22 +153,45 @@ services:
       JSEARCH_INTERVAL_MS: "${JSEARCH_INTERVAL_MS:-86400000}"
     volumes:
       # Persisted last-run state so restarts don't re-fetch (and burn quota).
-      - "${JD_JSEARCH_STATE_HOST:-${HOME}/.openclaw/jd-jsearch-state}:/state"
+      - "${JD_JSEARCH_STATE_HOST:-${JFAA_DATA_ROOT:-${HOME}/.local/share/jfaa}/jsearch-state}:/state"
     # No ports — outbound only (JSearch API + bridge). Shell-loop entrypoint + heartbeat healthcheck
     # are baked into the image; the JVM only runs ~once/day and exits.
 
   # Self-hosted Steel Browser — the CDP scraping backend (replaces host Chrome).
   # Built FROM SOURCE at a pinned commit: the prebuilt steel-browser images fail to launch Chrome
   # on Apple Silicon under Docker Desktop (bundled Chromium SIGTRAPs); Steel's own api/Dockerfile
-  # (apt Debian arm64 Chromium + xvfb) works. Verified end-to-end at this SHA.
+  # (apt Debian arm64 Chromium + xvfb) works. Verified end-to-end. Updated to latest main 2026-07-20.
   steel:
     build:
-      context: "https://github.com/steel-dev/steel-browser.git#c0f226b8e3b16d0bc2c76a222863d4db6f1aa8f2"
+      context: "https://github.com/steel-dev/steel-browser.git#5880b48c1af107219ff3d904edbb8f6b76bea9b6"
       dockerfile: api/Dockerfile
       args:
         NODE_VERSION: "22.13.0"
-    container_name: jobfit-steel
+    container_name: ${CONTAINER_PREFIX:-jobfit}-steel
     restart: unless-stopped
+    # Reap zombies. Steel's own entrypoint runs as PID 1 (a shell), and Chrome — launched with
+    # --no-zygote/--no-sandbox — spawns helper + crashpad processes that PID 1 never wait()s on.
+    # They pile up as <defunct> (observed 20k+ over ~14h). Worse: a crashed Chrome leaves a stale
+    # /tmp/steel-chrome/SingletonLock whose recorded PID is still "alive" as a zombie, so the NEXT
+    # launch aborts with "SingletonLock: File exists (17)" → every createSession 500s → the wedge.
+    # `init: true` runs tini as PID 1 to reap children, which stops the pileup AND frees those PIDs
+    # so Chrome recognises the stale lock as dead and clears it on relaunch.
+    init: true
+    # Belt-and-suspenders for the watchdog-restart path: `docker restart` keeps the writable layer
+    # (and thus /tmp), so a SingletonLock from the pre-restart crash can survive into the new start.
+    # Remove it before Steel's entrypoint launches Chrome. Preserves the original entrypoint (it sets
+    # up dbus when DEBUG=true — Chrome needs it); the image has no CMD, so there are no args to forward.
+    entrypoint: ["/bin/sh", "-c", "rm -f /tmp/steel-chrome/SingletonLock 2>/dev/null || true; exec /app/api/entrypoint.sh"]
+    # Mount /tmp as tmpfs so every (re)start gets a guaranteed-empty /tmp. Chrome's ephemeral
+    # userDataDir is /tmp/steel-chrome and a crash can leave /tmp/steel-chrome/SingletonLock behind;
+    # because `docker restart` preserves the writable layer, that stale lock would otherwise survive
+    # into the next start and abort Chrome ("SingletonLock: File exists"). A tmpfs is recreated fresh
+    # on every start, so no stale lock can carry across a restart — this is the durable fix; the
+    # entrypoint rm above is now belt-and-suspenders (and still covers an in-place relaunch). Nothing
+    # in /tmp needs to persist: the Chromium binary cache lives on the steel-data volume (/app/.cache)
+    # and auth persistence is the app-side storageState store, not the ephemeral /tmp profile.
+    tmpfs:
+      - /tmp
     environment:
       DEBUG: "true"                  # entrypoint only initialises dbus when DEBUG=true; Chrome needs it
       DOMAIN: "${STEEL_DOMAIN:-localhost:3000}"
@@ -168,19 +205,31 @@ services:
       # Publish the API/UI (and thus the interactive debug URL) on the Tailscale interface only —
       # set STEEL_BIND_ADDR to the host's tailnet IP in the repo-root .env so a phone can reach it.
       # Defaults to loopback (safe): the Steel UI has NO auth, so never bind it to 0.0.0.0.
-      - "${STEEL_BIND_ADDR:-127.0.0.1}:3000:3000"
+      # STEEL_PORT moves only the HOST side (a second instance publishes 23000); the container
+      # side stays 3000 — in-network consumers (STEEL_BASE_URL=http://steel:3000, the healthcheck,
+      # DOMAIN) are per-project-network and never change.
+      - "${STEEL_BIND_ADDR:-127.0.0.1}:${STEEL_PORT:-3000}:3000"
     healthcheck:
-      # Node (guaranteed present in the image) — /v1/sessions returns 200 once the API is serving.
-      # start_period covers dbus + Xvfb + first Chrome launch.
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/v1/sessions',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 40s
+      # Probe REAL session creation (POST /v1/sessions), not just GET /v1/sessions. When Steel is
+      # wedged (Chrome can't launch — see the SingletonLock/zombie note above — or a reused primary
+      # page died), createSession fails/500s while GET /v1/sessions + /v1/health keep returning 200 —
+      # a wedged-but-"healthy" container that silently drops every scrape to the email snippet. Only
+      # createSession detects that. The `init: true` + lock-cleanup above target the root cause; this
+      # probe stays as the detector of last resort. The probe releases its session so it doesn't leak;
+      # the 20s session timeout self-expires it even if release fails. Marking the container unhealthy
+      # here makes the wedge visible in `docker ps` and gives steel-watchdog.sh a status to key on
+      # (Docker's restart: unless-stopped will NOT restart an unhealthy container — the watchdog does).
+      # interval 60s (createSession is heavier than a GET → gentler on the single browser); retries 3
+      # so a transient blip / race with a real scrape doesn't flap it — ~3 min of failures = unhealthy.
+      test: ["CMD", "node", "-e", "const http=require('http');function req(m,p,b){return new Promise((res,rej)=>{const d=b?JSON.stringify(b):null;const r=http.request({host:'localhost',port:3000,path:p,method:m,headers:{'Content-Type':'application/json'},timeout:20000},x=>{let s='';x.on('data',c=>s+=c);x.on('end',()=>res({status:x.statusCode,body:s}))});r.on('error',rej);r.on('timeout',()=>{r.destroy();rej(new Error('t'))});if(d)r.write(d);r.end()})}(async()=>{try{const s=await req('POST','/v1/sessions',{timeout:20000});if(s.status!==200)process.exit(1);const id=JSON.parse(s.body).id;if(id){try{await req('POST','/v1/sessions/'+id+'/release')}catch(e){}}process.exit(0)}catch(e){process.exit(1)}})()"]
+      interval: 60s
+      timeout: 25s
+      retries: 3
+      start_period: 45s
 
   processor:
     build: ./services/job-fit-apply-ai-pipeline
-    container_name: jobfit-processor
+    container_name: ${CONTAINER_PREFIX:-jobfit}-processor
     restart: unless-stopped
     depends_on:
       bridge:
@@ -214,28 +263,46 @@ services:
       # so the empty-override caveat below does not apply.
       STEEL_BASE_URL: "${STEEL_BASE_URL:-}"
       STEEL_UI_URL: "${STEEL_UI_URL:-}"
+      # Tap-to-sign-in endpoint. STEEL_SIGNIN_PUBLIC_URL is the on/off switch: blank (default) and the
+      # endpoint is neither started nor advertised in re-auth alerts. Binds inside the container on
+      # 0.0.0.0 so the published port below can reach it; host-side exposure is what STEEL_SIGNIN_BIND_ADDR
+      # controls, and that defaults to loopback.
+      STEEL_SIGNIN_PUBLIC_URL: "${STEEL_SIGNIN_PUBLIC_URL:-}"
+      STEEL_SIGNIN_TOKEN: "${STEEL_SIGNIN_TOKEN:-}"
+      STEEL_SIGNIN_BIND_ADDR: "0.0.0.0"
+      STEEL_SIGNIN_PORT: "${STEEL_SIGNIN_PORT:-3100}"
+      STEEL_SIGNIN_WINDOW_MS: "${STEEL_SIGNIN_WINDOW_MS:-1800000}"
       # ARTIFACT_BASE_URL is intentionally NOT set here: an empty `${ARTIFACT_BASE_URL:-}` override
       # would win over the mounted /app/.env (real env beats dotenv in Config.get), blanking the
       # report/notification links. The value lives in services/.../pipeline/.env (markserv tailnet URL).
     volumes:
       # Same host dir markserv serves read-only at :8081 — reports/PDFs keep their URLs.
-      - ./services/job-fit-apply-ai-pipeline/output:/app/output
-      # Steel persisted session state (STEEL_STORAGE_STATE_PATH, PROJECT_DIR/state). Host-mounted so
-      # the exported cookies survive processor restarts and are backup-able. Gitignored (state/).
-      - ./services/job-fit-apply-ai-pipeline/state:/app/state
+      - "${JD_PIPELINE_OUTPUT_HOST:-${JFAA_DATA_ROOT:-${HOME}/.local/share/jfaa}/pipeline-output}:/app/output"
+      # Steel persisted session state (STEEL_STORAGE_STATE_PATH, PROJECT_DIR/state). Root-derived so
+      # exported cookies survive restarts and are backup-able; keep private and never serve via Markserv.
+      - "${JD_PIPELINE_STATE_HOST:-${JFAA_DATA_ROOT:-${HOME}/.local/share/jfaa}/pipeline-state}:/app/state"
       # Pipeline secrets + per-node model config (gitignored). dotenv reads /app/.env; real env
       # vars above win over it (Config.get precedence), so host-specific endpoints inside are
-      # safely overridden.
-      - ./services/job-fit-apply-ai-pipeline/.env:/app/.env:ro
+      # safely overridden. PIPELINE_ENV_FILE lets a second instance mount its own copy
+      # (ARTIFACT_BASE_URL must differ per instance and cannot come from compose `environment:`
+      # — see the blank-override note above). This is also the A/B lever: change models/config
+      # for a test instance in its file only.
+      - ${PIPELINE_ENV_FILE:-./services/job-fit-apply-ai-pipeline/.env}:/app/.env:ro
       # Personal, gitignored inputs at their default PROJECT_DIR-relative locations.
       - ./services/job-fit-apply-ai-pipeline/src/main/resources/resume/resume.yaml:/app/src/main/resources/resume/resume.yaml:ro
       - ./services/job-fit-apply-ai-pipeline/config/candidate_profile.yaml:/app/config/candidate_profile.yaml:ro
-    # No ports — outbound only (bridge, db, host LLMs/CDP, cloud APIs). Healthcheck (exec
+    ports:
+      # Tap-to-sign-in endpoint only. Same rule as the steel service's port: published on the
+      # Tailscale interface so a phone can reach it, loopback by default — it creates browser
+      # sessions and redirects into an unauthenticated live view, so never bind it to 0.0.0.0.
+      # Inert unless STEEL_SIGNIN_PUBLIC_URL is set (the server isn't started otherwise).
+      - "${STEEL_SIGNIN_BIND_ADDR:-127.0.0.1}:${STEEL_SIGNIN_PORT:-3100}:${STEEL_SIGNIN_PORT:-3100}"
+    # Otherwise outbound only (bridge, db, host LLMs/CDP, cloud APIs). Healthcheck (exec
     # --health, heartbeat freshness) is baked into the image.
 
   notifier:
     build: ./services/job-fit-apply-ai-notifier
-    container_name: jobfit-notifier
+    container_name: ${CONTAINER_PREFIX:-jobfit}-notifier
     restart: unless-stopped
     depends_on:
       bridge:
@@ -244,15 +311,18 @@ services:
       # Heap cap (see bridge). Notifier is a lightweight completed-event consumer.
       JAVA_TOOL_OPTIONS: "-Xmx256m -XX:MaxMetaspaceSize=128m -XX:+ExitOnOutOfMemoryError"
       JD_BRIDGE_URL: "http://bridge:8765"
-      # Discord/Telegram creds — put these in the repo-root .env (gitignored). Blank → nothing sent.
+      # Discord/Telegram creds — put these in the repo-root .env (gitignored). Namespaced
+      # notifier values win; generic Telegram values remain a backward-compatible fallback.
       DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
       DISCORD_CHANNEL_ID: "${DISCORD_CHANNEL_ID:-}"
+      NOTIFIER_TELEGRAM_BOT_TOKEN: "${NOTIFIER_TELEGRAM_BOT_TOKEN:-}"
+      NOTIFIER_TELEGRAM_CHAT_ID: "${NOTIFIER_TELEGRAM_CHAT_ID:-}"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
       NOTIFICATION_FIT_THRESHOLD: "${NOTIFICATION_FIT_THRESHOLD:-50}"
     volumes:
       # Persisted consumer cursor (max completed_seq notified) — survives restarts.
-      - "${JD_NOTIFIER_STATE_HOST:-${HOME}/.openclaw/jd-notifier-state}:/state"
+      - "${JD_NOTIFIER_STATE_HOST:-${JFAA_DATA_ROOT:-${HOME}/.local/share/jfaa}/notifier-state}:/state"
     # No ports — a completed-feed event consumer. Healthcheck (exec --health) baked into the image.
 
 volumes:

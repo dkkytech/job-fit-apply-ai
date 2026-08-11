@@ -54,8 +54,9 @@ Mac, Chromium uses system fonts; a bare Linux container has almost none, so PDFs
 expects. This directly degrades the product output (the resume PDF) and is easy to miss.
 
 ### 3. Shared output volume + slow Mac bind-mount IO
-The Processor writes `report.md` + the resume PDF to `OUTPUT_DIR`
-(`services/job-fit-apply-ai-pipeline/output`), which **markserv mounts and serves**. The container
+The Processor writes `report.md` + the resume PDF to `OUTPUT_DIR` (at the time of writing
+`services/job-fit-apply-ai-pipeline/output`; since #67 the host source is
+`${JFAA_DATA_ROOT}/pipeline-output`), which **markserv mounts and serves**. The container
 must write the same volume. Docker Desktop bind-mount IO on Mac (gRPC-FUSE) is **slow**, and the
 Processor is fs-heavy (PDF writes + template/profile/skills reads every job) → throughput hit.
 

@@ -101,6 +101,20 @@ class AlertServiceTest {
     }
 
     @Test
+    @DisplayName("reauthCaptured confirms the sign-in landed, and is NOT de-duped")
+    fun reauthCaptured() {
+        // Closes the loop opened by reauthRequired. Each successful sign-in is its own event: two
+        // sign-ins to the same board must both be confirmed, or the second looks like it failed.
+        val client = mock<NotificationClient>()
+        val alerts = AlertService(client)
+        alerts.reauthCaptured("LinkedIn", 7)
+        alerts.reauthCaptured("LinkedIn", 9)
+        verify(client, times(2)).postDiscord(check {
+            assertTrue(it.contains("Signed in: LinkedIn"), "should name the site that was signed into")
+        })
+    }
+
+    @Test
     @DisplayName("chromeDebugUnavailable de-dupes and references the endpoint")
     fun chromeDebugUnavailable() {
         val client = mock<NotificationClient>()

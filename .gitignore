@@ -15,6 +15,8 @@ Thumbs.db
 .env.*
 !.env.example
 !.env.ci.example
+# Committed template for a second (test) instance — copy to gitignored .env.test.
+!.env.test.example
 
 # Logs
 *.log
@@ -42,3 +44,8 @@ bun.lockb
 # Kotlin/Eclipse compiled output (e.g. services/*/bin/main, bin/test)
 **/bin/
 **/.gradle/
+
+# E2E slice per-run state (docker-compose.e2e.yml bind-mount sources)
+/.e2e/
+# Second ("source") e2e slice for the multi-instance scenarios (#56 sc. 9/10)
+/.e2e-src/

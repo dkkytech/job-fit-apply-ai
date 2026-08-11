@@ -9,8 +9,14 @@ You are drafting a professional email reply to a recruiter who has reached out a
 3. Write a reply in Smart Brevity style that:
    - Confirms interest in the role
    - States why I am a good fit for the role
-   - Answers each identified question directly
+   - Answers each identified question that can be grounded (see the Grounding rule)
    - Mentions that a resume is attached
+
+{{missing_info_directive}}
+
+## Grounding rule
+
+Answer a recruiter's question ONLY if the answer is stated in, or can be reasonably inferred from, the Candidate profile below. Reasonable inference is allowed — e.g. MacOS experience can be inferred from Swift/Xcode work, or CI experience from GitHub Actions bullets. If a question CANNOT be grounded in the profile, **omit it entirely**: do not answer it, do not acknowledge it, and do not promise to follow up. Never invent facts, numbers, employers, or credentials that are not in the profile.
 
 ## Tone and style
 
@@ -37,7 +43,9 @@ Return ONLY the plain-text email body — no subject line, no metadata, no markd
 **Fit score:** {{fit_score}}
 **My strengths for this role:** {{strengths}}
 
-{{preferences}}
+## Candidate profile (the ONLY source of truth for answering questions)
+
+{{candidate_profile}}
 
 ## Recruiter email
 

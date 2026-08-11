@@ -17,11 +17,12 @@ from pathlib import Path
 from analyzer import history
 
 # Which metric each finding category should move once fixed (rate/badness metrics: lower is better).
+# Only map categories with a direct, trustworthy metric. Scraping and infrastructure failures can
+# degrade into an intentional fallback (email snippets) without increasing hard error_rate, so
+# evaluating them against error_rate would falsely declare a live outage resolved.
 CATEGORY_METRIC = {
     "scoring": "zero_score_rate",
     "digest": "thin_digest_rate",
-    "scraping": "error_rate",
-    "infra": "error_rate",
     "tailoring": "error_rate",
     "config": "error_rate",
 }
@@ -116,7 +117,11 @@ def check_outcomes(findings_ledger_load, autofix_ledger_path, history_path, k=3)
         fentry = findings_ledger_load.get(fp) or {}
         if fentry.get("status") == "resolved":
             continue  # already retired
-        metric = CATEGORY_METRIC.get(fentry.get("category", ""), "error_rate")
+        metric = CATEGORY_METRIC.get(fentry.get("category", ""))
+        # Do not auto-resolve a category until it has a direct, category-specific recovery
+        # signal. In particular, scraper/infra fallbacks may keep error_rate at zero.
+        if metric is None:
+            continue
         merged_ep = _iso_epoch(e.get("merged_ts"))
         if merged_ep is None:
             continue

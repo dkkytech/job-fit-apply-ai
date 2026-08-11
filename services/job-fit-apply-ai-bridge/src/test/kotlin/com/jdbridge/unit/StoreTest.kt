@@ -305,3 +305,112 @@ class JdJsonFieldRoundTripTest {
         assertTrue(row.jdJson!!.contains("example.com/job/123"), "job_url should be preserved in jd_json")
     }
 }
+
+/**
+ * Completion reliability — issue #56 scenario 2.
+ *
+ * `recordResult` used to be unconditional: it burned a `completed_seq` and overwrote the row
+ * whatever state the row was in. Two consequences, both invisible from outside: a duplicate or
+ * late POST produced a *second* completed event (so the Notifier delivered the job twice), and a
+ * worker displaced by stale-claim requeue could overwrite the attempt that replaced it.
+ *
+ * The stale-claim half is unit-tested rather than black-boxed on purpose: provoking a real
+ * requeue end-to-end needs a stale window shorter than a job takes to process, which would make
+ * every other scenario flaky.
+ */
+class StoreCompletionReliabilityTest {
+
+    @BeforeEach
+    fun setup() {
+        useTempStoreDir()
+        initTestDb()
+    }
+
+    private fun tailorResult(token: String? = null, action: String = "TAILOR", score: Int = 85) =
+        ResultRequest(pipeline_action = action, fit_score = score, claim_token = token)
+
+    @Test
+    fun `claimNext hands out a fresh token per claim`() = runTest {
+        val first = enqueue(defaultJdJson(), null, null)
+        val second = enqueue(defaultJdJson(), null, null)
+
+        val a = claimNext()!!
+        val b = claimNext()!!
+
+        assertNotNull(a.claimToken)
+        assertNotNull(b.claimToken)
+        assertNotEquals(a.claimToken, b.claimToken, "each claim must get its own fence")
+        assertEquals(setOf(first, second), setOf(a.id, b.id))
+    }
+
+    @Test
+    fun `a matching token records the result`() = runTest {
+        enqueue(defaultJdJson(), null, null)
+        val claimed = claimNext()!!
+
+        assertEquals(ResultOutcome.RECORDED, recordResult(claimed.id, tailorResult(claimed.claimToken)))
+        assertEquals(JobStatus.DONE.value, getJob(claimed.id)!!.status)
+    }
+
+    @Test
+    fun `a null token is accepted, so a pre-fencing worker is not wedged`() = runTest {
+        enqueue(defaultJdJson(), null, null)
+        val claimed = claimNext()!!
+
+        assertEquals(ResultOutcome.RECORDED, recordResult(claimed.id, tailorResult(token = null)))
+        assertEquals(JobStatus.DONE.value, getJob(claimed.id)!!.status)
+    }
+
+    @Test
+    fun `a second result for a terminal job is ignored and burns no sequence number`() = runTest {
+        enqueue(defaultJdJson(), null, null)
+        val claimed = claimNext()!!
+        assertEquals(ResultOutcome.RECORDED, recordResult(claimed.id, tailorResult(claimed.claimToken)))
+        val firstSeq = getJob(claimed.id)!!.completedSeq
+        val headAfterFirst = latestCompletedSeq()
+
+        val second = recordResult(claimed.id, tailorResult(claimed.claimToken, action = "SKIP", score = 1))
+
+        assertEquals(ResultOutcome.ALREADY_TERMINAL, second)
+        val row = getJob(claimed.id)!!
+        assertEquals(firstSeq, row.completedSeq, "a duplicate must not re-sequence the job")
+        assertEquals("TAILOR", row.pipelineAction, "first result wins; the duplicate must not overwrite it")
+        assertEquals(headAfterFirst, latestCompletedSeq(), "an ignored result must not consume a sequence number")
+    }
+
+    @Test
+    fun `a displaced worker cannot overwrite the attempt that replaced it`() = runTest {
+        enqueue(defaultJdJson(), null, null)
+        val displaced = claimNext()!!
+
+        // Age the claim past the stale window, then let a second worker take it.
+        expireClaim(displaced.id)
+        val replacement = claimNext()!!
+
+        assertEquals(displaced.id, replacement.id, "the requeued job should be re-claimed")
+        assertNotEquals(displaced.claimToken, replacement.claimToken)
+
+        val late = recordResult(displaced.id, tailorResult(displaced.claimToken, action = "SKIP", score = 1))
+        assertEquals(ResultOutcome.STALE_CLAIM, late)
+        assertEquals(JobStatus.CLAIMED.value, getJob(displaced.id)!!.status, "the refused write must not terminate the job")
+
+        // The replacement still completes normally.
+        assertEquals(ResultOutcome.RECORDED, recordResult(replacement.id, tailorResult(replacement.claimToken)))
+        val row = getJob(replacement.id)!!
+        assertEquals("TAILOR", row.pipelineAction)
+        assertEquals(JobStatus.DONE.value, row.status)
+    }
+
+    @Test
+    fun `requeue clears the token, so the displaced worker's fence matches nothing`() = runTest {
+        enqueue(defaultJdJson(), null, null)
+        val displaced = claimNext()!!
+        expireClaim(displaced.id)
+
+        // Force the inline requeue without re-claiming: a second enqueue + claim would take the
+        // other row, so claim the same one back and check the token rotated rather than persisted.
+        val replacement = claimNext()!!
+        assertNotEquals(displaced.claimToken, replacement.claimToken)
+        assertEquals(ResultOutcome.STALE_CLAIM, recordResult(displaced.id, tailorResult(displaced.claimToken)))
+    }
+}

@@ -1,0 +1,19 @@
+{
+  "target_title": "Staff Software Engineer in Test",
+  "seniority_signals": ["own the test strategy", "mentor engineers and drive testing culture"],
+  "must_have": [
+    "seven plus years of software engineering experience focused on test automation",
+    "expert level Kotlin proficiency for mobile test automation frameworks",
+    "hands on experience building Espresso and XCUITest suites",
+    "continuous integration pipeline ownership with GitHub Actions or Bitrise",
+    "experience building device farm test infrastructure at scale"
+  ],
+  "nice_to_have": ["experience with observability tooling such as Datadog or Grafana"],
+  "exact_match_terms": [],
+  "skill_groupings": [
+    {"label": "Mobile Automation", "items": ["Espresso", "XCUITest", "Jetpack Compose testing"]},
+    {"label": "CI/CD", "items": ["GitHub Actions", "Bitrise", "CircleCI"]}
+  ],
+  "domain_keywords": ["mobile quality engineering", "release quality gates"],
+  "company_value_signals": ["partner closely with engineering leadership"]
+}

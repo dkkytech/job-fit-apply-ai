@@ -1,0 +1,10 @@
+Dear Hiring Team,
+
+I noticed your Staff Software Engineer in Test opening and it reads like the job I have been doing by choice for years: building the automation frameworks and CI pipelines a mobile organisation actually adopts, not just tolerates.
+
+At NovaPay I built the Android Espresso framework that covers 340 scenarios and cut release regression from three days to six hours, then wired a 24-configuration Firebase Test Lab matrix into GitHub Actions so device-specific defects surface before release rather than after. Before that, at Harborline Systems, I automated a 1,200-check API regression suite in Kotlin.
+
+I would love to talk about how that experience maps onto your test strategy and quality gates.
+
+Best regards,
+Alex Winters

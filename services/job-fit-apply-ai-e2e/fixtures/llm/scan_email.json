@@ -1,0 +1,11 @@
+{
+  "is_job_posting": true,
+  "job_url": null,
+  "jd_text": "EMAIL_SCAN_JD_MARKER {{COMPANY}} is hiring a {{ROLE}} to own mobile and API automation architecture, Kotlin test frameworks, Appium device-lab reliability, contract testing, CI/CD paved roads, and observable test infrastructure. The engineer will partner with application and platform teams, improve release confidence, maintain deterministic test data, and measure feedback latency. The role requires eight years of senior test-engineering experience and demonstrated ownership of distributed quality platforms.",
+  "company": "{{COMPANY}}",
+  "role_title": "{{ROLE}}",
+  "location": "Remote (US)",
+  "remote_policy": "remote",
+  "yoe_required": 8,
+  "tech_stack": ["Kotlin", "Appium", "Playwright", "Docker", "OpenTelemetry"]
+}

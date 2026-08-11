@@ -16,11 +16,29 @@ if [ -z "$TS" ]; then
   else echo "ERROR: tailscale CLI not found (set TAILSCALE_BIN)"; exit 1; fi
 fi
 
+# Instance-aware ports: read the compose env file (ENV_FILE, default .env) for the
+# host ports this instance publishes, falling back to the prod defaults. Each instance's
+# ports are distinct, so both instances' serve mappings coexist — `tailscale serve` binds
+# each tailnet port once and we never reuse one across instances.
+ENV_FILE="${ENV_FILE:-.env}"
+env_port() { # env_port <VAR> <default> — read VAR from ENV_FILE (env var wins), strip quotes
+  local key="$1" default="$2" value=""
+  value="${!key:-}"
+  if [ -z "$value" ] && [ -f "$ENV_FILE" ]; then
+    value="$(grep -E "^[[:space:]]*${key}=" "$ENV_FILE" | tail -1 | cut -d= -f2- || true)"
+    value="${value%\"}"; value="${value#\"}"
+  fi
+  printf '%s' "${value:-$default}"
+}
+MARKSERV_PORT="$(env_port MARKSERV_PORT 8081)"
+BRIDGE_PORT="$(env_port JD_BRIDGE_PORT 8765)"
+FRONTEND_PORT="$(env_port FRONTEND_PORT 3030)"
+
 # One line per tailnet-exposed service: "<tailnet-port>|<local-target>|<label>".
 SERVICES="
-8081|http://127.0.0.1:8081|markserv
-8765|http://127.0.0.1:8765|bridge
-3030|http://127.0.0.1:3030|frontend
+$MARKSERV_PORT|http://127.0.0.1:$MARKSERV_PORT|markserv
+$BRIDGE_PORT|http://127.0.0.1:$BRIDGE_PORT|bridge
+$FRONTEND_PORT|http://127.0.0.1:$FRONTEND_PORT|frontend
 "
 
 # TCP connect check on the host loopback (bash /dev/tcp).
