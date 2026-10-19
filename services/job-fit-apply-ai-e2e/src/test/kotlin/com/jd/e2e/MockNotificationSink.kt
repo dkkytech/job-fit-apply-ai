@@ -125,6 +125,40 @@ class MockNotificationSink(private val port: Int) {
     fun telegramTexts(): List<String> = delivered("telegram").map { it.body.path("text").asText() }
 
     /**
+     * The inline keyboards the notifier attached, one entry per delivered Telegram message that
+     * carried a `reply_markup`. Absent markup is skipped rather than yielding an empty entry, so
+     * "no buttons" and "no message" stay distinguishable.
+     */
+    fun telegramReplyMarkups(): List<JsonNode> =
+        delivered("telegram").mapNotNull { it.body.path("reply_markup").takeIf { n -> !n.isMissingNode } }
+
+    /**
+     * Button captions across every delivered Telegram message, flattened in order.
+     * `rows` is preserved (not flattened) by [telegramButtonRows].
+     */
+    fun telegramButtonLabels(): List<String> =
+        telegramReplyMarkups().flatMap { markup ->
+            markup.path("inline_keyboard").flatMap { row -> row.map { it.path("text").asText() } }
+        }
+
+    /** Each delivered keyboard as a list of rows, so layout ("All on one line?") is assertable. */
+    fun telegramButtonRows(): List<List<String>> =
+        telegramReplyMarkups().flatMap { markup ->
+            markup.path("inline_keyboard").map { row -> row.map { it.path("text").asText() } }
+        }
+
+    /** url/callback_data pairs in order, so a button's *kind* can be asserted, not just its label. */
+    fun telegramButtons(): List<Pair<String, String>> =
+        telegramReplyMarkups().flatMap { markup ->
+            markup.path("inline_keyboard").flatMap { row ->
+                row.map { b ->
+                    b.path("text").asText() to
+                        (b.path("url").asText("").ifBlank { "cb:" + b.path("callback_data").asText("") })
+                }
+            }
+        }
+
+    /**
      * Everything that arrived at an unrecognised path — a wrong channel id, a wrong bot
      * token, or a changed URL shape. Tests fold this into their timeout messages so the
      * symptom ("no Discord message") names the cause instead of pointing at the notifier.

@@ -1,6 +1,7 @@
 package com.jd.jsearch
 
 import com.jd.jsearch.bridge.JsearchBridgeClient
+import com.jd.jsearch.bridge.SubmitJobRequest
 import com.jd.jsearch.bridge.SubmitJobResponse
 import com.jd.jsearch.client.JSearchClient
 import com.jd.jsearch.model.JobListing
@@ -9,6 +10,7 @@ import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import org.mockito.kotlin.any
+import org.mockito.kotlin.argumentCaptor
 import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
@@ -119,5 +121,29 @@ class IngestRunnerTest {
         assertEquals(1, ran.queued)
         assertEquals(1, ran.deduped)
         assertEquals(1, ran.skipped)   // the null/failed one
+    }
+
+    @Test
+    @DisplayName("submits JSearch's structured fields so the report isn't blank")
+    fun submitsStructuredFields(@TempDir dir: Path) {
+        val l = listing("a", longJd(), remote = true).copy(
+            jobEmploymentType = "FULLTIME", jobMinSalary = 101_000.0, jobMaxSalary = 127_000.0,
+            jobSalaryPeriod = "YEAR", jobRequiredExperience = JobListing.RequiredExperience(72),
+            jobRequiredSkills = listOf("Appium"),
+        )
+        val client = mock<JSearchClient> {
+            on { search(any()) } doReturn listOf(l)
+            on { callCount } doReturn 1
+        }
+        val bridge = mock<JsearchBridgeClient> { on { submit(any()) } doReturn SubmitJobResponse("j", "pending") }
+
+        runner(AtomicInteger(0), client, bridge, RunState(dir.resolve("s.json"))).runOnce(NOW)
+
+        val sent = argumentCaptor<SubmitJobRequest>().also { verify(bridge).submit(it.capture()) }.firstValue
+        assertEquals("\$101K - \$127K/yr", sent.salaryRange)
+        assertEquals("remote", sent.remotePolicy)
+        assertEquals("Full-time", sent.employmentType)
+        assertEquals(6, sent.yoeRequired)
+        assertEquals(listOf("Appium"), sent.techStack)
     }
 }

@@ -43,6 +43,9 @@ tailoring:
     - "__TODO__: term to never claim 1"
 
 preferences:
+  # false: onsite or hybrid roles whose office is in a different US state (or outside the US)
+  # than identity.location's state are skipped. Remote roles, and roles with no identifiable
+  # state, are never skipped for location.
   willing_to_relocate: false
   relocation_notes: "__TODO__: free text about relocation/work-arrangement preferences"
   visa_status: "__TODO__: e.g. 'US Citizen', 'H1B', 'GC'"

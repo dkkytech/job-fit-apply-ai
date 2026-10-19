@@ -24,6 +24,7 @@ object Json {
         JsonSubTypes.Type(value = IntakeContext.Api::class, name = "api"),
         JsonSubTypes.Type(value = IntakeContext.Synthetic::class, name = "synthetic"),
         JsonSubTypes.Type(value = IntakeContext.WebCapture::class, name = "web_capture"),
+        JsonSubTypes.Type(value = IntakeContext.Link::class, name = "link"),
     )
     internal abstract class IntakeContextMixin
 }

@@ -2,10 +2,12 @@ package com.jd.pipeline.cli.commands
 
 import com.jd.pipeline.client.BridgeClient
 import com.jd.pipeline.client.ClaimDto
+import com.jd.pipeline.client.TransientFailureClassifier
 import com.jd.pipeline.client.SigninServer
 import com.jd.pipeline.client.WorkItemType
 import com.jd.pipeline.config.Config
 import com.jd.pipeline.utils.Heartbeat
+import com.jd.pipeline.pipeline.DeferredTailorRelease
 import com.jd.pipeline.pipeline.EmailDisposition
 import com.jd.pipeline.pipeline.EmailResolution
 import com.jd.pipeline.pipeline.IngestionPipeline
@@ -15,6 +17,7 @@ import com.jd.pipeline.source.IngestionSource
 import com.jd.pipeline.source.IntakeContext
 import com.jd.pipeline.source.JdRecord
 import com.jd.pipeline.source.ProcessingResult
+import com.jd.pipeline.source.TailorRequest
 import com.jd.pipeline.state.JDState
 import com.jd.pipeline.state.PipelineAction
 
@@ -31,6 +34,7 @@ object ProcessorCommandHandler {
         pipeline: ProcessingPipeline = ProcessingPipeline(),
         ingestion: IngestionPipeline = IngestionPipeline(),
         heartbeat: Heartbeat = Heartbeat.fromConfig(Config.HEARTBEAT_FILE),
+        deferredRelease: DeferredTailorRelease = DeferredTailorRelease(bridge),
     ) {
         // Messaging (Discord/Telegram) is now a separate Notifier service that consumes the bridge's
         // completed-event stream. The Processor just posts results.
@@ -41,6 +45,8 @@ object ProcessorCommandHandler {
             // Liveness for the container healthcheck (`--health`). Beats only between jobs, so
             // the freshness window (HEALTH_MAX_AGE_MIN) must tolerate a long job.
             heartbeat.beat()
+            // Between jobs: queue deferred tailoring once the cloud quota is back, expire stale ones.
+            deferredRelease.maybeRun()
 
             val claimed = try {
                 bridge.claim()
@@ -64,6 +70,8 @@ object ProcessorCommandHandler {
             // JD_SCRAPED (JSearch / digest child) goes straight to processing. A branch that
             // terminates here (digest/non-job/error) is recorded to the run log before we `continue`,
             // so the analyzer never loses a completed job.
+            // Set only for a Tailor tap: the pipeline then tailors whatever the score.
+            var tailor: TailorRequest? = null
             val jdRecord: JdRecord = when (claimed.type) {
                 WorkItemType.EMAIL_RAW -> when (val r = resolveEmail(claimed, bridge, ingestion)) {
                     is Resolution.Proceed  -> r.jdRecord
@@ -72,6 +80,25 @@ object ProcessorCommandHandler {
                 WorkItemType.JD_PAGE_RAW -> when (val r = resolvePageCapture(claimed, bridge, ingestion)) {
                     is Resolution.Proceed  -> r.jdRecord
                     is Resolution.Terminal -> { recordTerminal(claimed.jobId, r, jobStartedAt); continue }
+                }
+                WorkItemType.JD_URL -> when (val r = resolveUrl(claimed, bridge, ingestion)) {
+                    is Resolution.Proceed  -> r.jdRecord
+                    is Resolution.Terminal -> { recordTerminal(claimed.jobId, r, jobStartedAt); continue }
+                }
+                WorkItemType.TAILOR_REQUEST -> {
+                    val req = claimed.tailor
+                    if (req == null) {
+                        System.err.println("[processor] claim ${claimed.jobId} (TAILOR_REQUEST) has no payload — failing it")
+                        val terminal = postTerminal(
+                            bridge, claimed, emptyLogRecord(IngestionSource.MANUAL),
+                            skipResult("TAILOR_REQUEST claim missing its record"),
+                        )
+                        recordTerminal(claimed.jobId, terminal, jobStartedAt)
+                        continue
+                    }
+                    tailor = TailorRequest(parentJobId = req.parentJobId, trackId = req.trackId, jobBoard = req.jobBoard)
+                    println("[processor] Tailor requested for job ${req.parentJobId} (track ${req.trackId})")
+                    req.record
                 }
                 else -> {
                     val rec = claimed.jdRecord
@@ -93,9 +120,10 @@ object ProcessorCommandHandler {
             println("[processor] Processing job ${claimed.jobId} — ${jdRecord.roleTitle} @ ${jdRecord.company}")
 
             val result: ProcessingResult = try {
-                pipeline.invoke(jdRecord)
+                pipeline.invoke(jdRecord, tailor)
             } catch (e: Exception) {
                 System.err.println("[processor] pipeline threw for ${claimed.jobId}: ${e.message}")
+                val retryable = TransientFailureClassifier.isRetryable(e)
                 ProcessingResult(
                     pipelineAction = PipelineAction.SKIP.name,
                     fitScore       = 0,
@@ -104,6 +132,10 @@ object ProcessorCommandHandler {
                     outputPath     = null,
                     hasCoverLetter = false,
                     error          = e.message,
+                    retryable      = retryable,
+                    // Never let an execution failure fall through to the Poller's JD_Not_Found
+                    // compatibility fallback: this is an error, not a classification outcome.
+                    terminalLabel  = if (retryable) null else TerminalLabel.JD_ERROR,
                     // Carry identity so the completed-event (JD_Error) still shows what failed.
                     company        = jdRecord.company,
                     roleTitle      = jdRecord.roleTitle,
@@ -233,12 +265,23 @@ object ProcessorCommandHandler {
         val failed = mutableListOf<String>()
         children.forEachIndexed { index, child ->
             val identity = child.jobUrl.ifBlank { "#$index" }
-            val key = "$parentMessageId|$identity"
+            // A link-only child (employer alert) is keyed on the posting itself, not this email, so
+            // the same posting from the watchlist or a later alert is one job at the bridge.
+            val key = if (child.submitAsUrl && child.postingKey.isNotBlank()) child.postingKey else "$parentMessageId|$identity"
             // Everything inside the try: an `onSuccess` block runs *outside* runCatching's
             // protection, so a throw while classifying the outcome would escape and kill the
             // processor loop — losing not just this child but the parent's terminal result.
             try {
-                val outcome = bridge.submitDetailed(ingestion.toJdRecord(child, idempotencyKey = key))
+                val outcome = if (child.submitAsUrl) {
+                    // An employer's own posting: the career-site dedupe window (60 days), same as
+                    // the watchlist's submissions of it.
+                    bridge.submitUrl(
+                        url = child.jobUrl, key = key, source = IngestionSource.CAREER_SITE.name,
+                        company = child.company, roleTitle = child.roleTitle, location = child.location,
+                    )
+                } else {
+                    bridge.submitDetailed(ingestion.toJdRecord(child, idempotencyKey = key))
+                }
                 if (outcome.deduped) deduped += key else queued += key
             } catch (e: Exception) {
                 System.err.println("[processor] digest child submit failed ($key): ${e.message}")
@@ -264,6 +307,13 @@ object ProcessorCommandHandler {
     )
 
     /** A bare JdRecord for a terminal claim we couldn't resolve at all (missing payload). */
+    /** Same floor the bridge applies to /api/jobs — shorter scrapes are a teaser or a wall, not a JD. */
+    private const val MIN_URL_JD_CHARS = 150
+
+    /** The submitter's source tag as an [IngestionSource]; unknown or absent tags count as MANUAL. */
+    internal fun ingestionSourceOf(tag: String?): IngestionSource =
+        IngestionSource.entries.firstOrNull { it.name.equals(tag?.trim(), ignoreCase = true) } ?: IngestionSource.MANUAL
+
     private fun emptyLogRecord(source: IngestionSource): JdRecord = JdRecord(
         jdText = "", company = null, roleTitle = null, location = null, jobUrl = null, source = source,
     )
@@ -298,22 +348,44 @@ object ProcessorCommandHandler {
             ingestion.invoke(emailState)   // scan → digest fan-out → scrape
         } catch (e: Exception) {
             System.err.println("[processor] ingestion failed for ${claimed.jobId}: ${e.message}")
+            val retryable = TransientFailureClassifier.isRetryable(e)
             return postTerminal(
                 bridge, claimed, logRecordOf(emailState, IngestionSource.EMAIL),
-                skipResult("ingestion: ${e.message}", TerminalLabel.JD_ERROR),
+                skipResult("ingestion: ${e.message}", if (retryable) null else TerminalLabel.JD_ERROR, retryable = retryable),
             )
         }
 
         return when (val disposition = EmailResolution.classify(ingState)) {
+            is EmailDisposition.ScrapeTerminal -> {
+                System.err.println(
+                    "[processor] terminal scrape outcome for ${claimed.jobId}: ${disposition.reason}",
+                )
+                postTerminal(
+                    bridge, claimed, logRecordOf(ingState, IngestionSource.EMAIL),
+                    skipResult(
+                        "scrape terminal ${disposition.reason}: ${disposition.message}",
+                        disposition.reason.terminalLabel,
+                        ingState.scrapePath,
+                    ),
+                )
+            }
             is EmailDisposition.Error -> {
                 // Scan/scrape FAILED (e.g. a transient LLM 507) — not a verdict that this isn't a
                 // job. Label JD_Error, never JD_Not_Found: mislabeling a real recruiter email as
                 // "not found" silently drops it (the intake query excludes JD_Not_Found) and the
-                // user has no signal it needs a retry.
+                // user has no signal it needs a retry. A transient failure a node caught into
+                // state.error (Steel down, a timed-out LLM call) first gets the same bridge retry a
+                // thrown one does; the bridge applies JD_Error once the retry budget is spent.
                 System.err.println("[processor] ingestion error for ${claimed.jobId}: ${disposition.message}")
+                val retryable = TransientFailureClassifier.isRetryableMessage(disposition.message)
                 postTerminal(
                     bridge, claimed, logRecordOf(ingState, IngestionSource.EMAIL),
-                    skipResult(disposition.message, TerminalLabel.JD_ERROR, ingState.scrapePath),
+                    skipResult(
+                        disposition.message,
+                        if (retryable) null else TerminalLabel.JD_ERROR,
+                        ingState.scrapePath,
+                        retryable = retryable,
+                    ),
                 )
             }
             is EmailDisposition.ReEnqueueChildren -> {
@@ -348,6 +420,11 @@ object ProcessorCommandHandler {
                     bridge, claimed, logRecordOf(ingState, IngestionSource.EMAIL),
                     skipResult(null, TerminalLabel.JD_NOT_FOUND, ingState.scrapePath),
                 )
+            EmailDisposition.SkipApplicationUpdate ->
+                postTerminal(
+                    bridge, claimed, logRecordOf(ingState, IngestionSource.EMAIL),
+                    skipResult(null, TerminalLabel.APPLICATION_UPDATE, ingState.scrapePath),
+                )
             EmailDisposition.Process ->
                 Resolution.Proceed(ingestion.toJdRecord(ingState, idempotencyKey = email.messageId))
         }
@@ -377,9 +454,10 @@ object ProcessorCommandHandler {
             ingestion.scrapeNode.process(state)   // dual-mode: extracts from capturedText, no fetch
         } catch (e: Exception) {
             System.err.println("[processor] page extraction failed for ${claimed.jobId}: ${e.message}")
+            val retryable = TransientFailureClassifier.isRetryable(e)
             return postTerminal(
                 bridge, claimed, logRecordOf(state, IngestionSource.EXTENSION),
-                skipResult("extraction: ${e.message}"),
+                skipResult("extraction: ${e.message}", if (retryable) null else TerminalLabel.JD_ERROR, retryable = retryable),
             )
         }
 
@@ -413,6 +491,53 @@ object ProcessorCommandHandler {
     }
 
     /**
+     * Scrape a claimed posting URL (JD_URL) into a [JdRecord] — the same [ScrapeJdNode] fetch
+     * digest-email children use. The submitter's company/title/location are fallbacks for what the
+     * scrape can't extract. A scrape error a node caught as transient (Steel down, LLM timeout) is
+     * retried by the bridge like a thrown one; anything else, or a page with no usable JD, ends as
+     * a SKIP. There is no Gmail message, so no terminal label.
+     */
+    private fun resolveUrl(claimed: ClaimDto, bridge: BridgeClient, ingestion: IngestionPipeline): Resolution {
+        val link = claimed.url
+            ?: return postTerminal(bridge, claimed, emptyLogRecord(IngestionSource.MANUAL), skipResult("JD_URL claim missing url payload"))
+        val source = ingestionSourceOf(link.source)
+        val state = JDState(intake = IntakeContext.Link(url = link.url, source = source.name), jobUrl = link.url)
+        val scraped = try {
+            ingestion.scrapeNode.process(state)
+        } catch (e: Exception) {
+            System.err.println("[processor] url scrape failed for ${claimed.jobId}: ${e.message}")
+            val retryable = TransientFailureClassifier.isRetryable(e)
+            return postTerminal(bridge, claimed, logRecordOf(state, source), skipResult("scrape: ${e.message}", retryable = retryable))
+        }
+        if (scraped.error.isNotBlank()) {
+            val retryable = TransientFailureClassifier.isRetryableMessage(scraped.error)
+            return postTerminal(
+                bridge, claimed, logRecordOf(scraped, source),
+                skipResult("scrape: ${scraped.error}", scrapePath = scraped.scrapePath, retryable = retryable),
+            )
+        }
+        if (scraped.jdText.length < MIN_URL_JD_CHARS) {
+            return postTerminal(
+                bridge, claimed, logRecordOf(scraped, source),
+                skipResult("No job description could be extracted from ${link.url}", scrapePath = scraped.scrapePath),
+            )
+        }
+        return Resolution.Proceed(
+            JdRecord(
+                jdText         = scraped.jdText,
+                company        = scraped.company.ifBlank { null } ?: link.company?.ifBlank { null },
+                roleTitle      = scraped.roleTitle.ifBlank { null } ?: link.roleTitle?.ifBlank { null },
+                location       = scraped.location.ifBlank { null } ?: link.location?.ifBlank { null },
+                jobUrl         = scraped.jobUrl.ifBlank { link.url },
+                source         = source,
+                idempotencyKey = link.idempotencyKey ?: link.url,
+                intakeMeta     = scraped.intake,
+                scrapePath     = scraped.scrapePath,
+            ),
+        )
+    }
+
+    /**
      * A terminal SKIP result for an item that never reaches [ProcessingPipeline]. [terminalLabel]
      * is the Gmail label the Poller must apply (mirrors [TerminalLabel.forState] for the states we
      * short-circuit past): without it the email carries no terminal label, so the Poller can't move
@@ -424,6 +549,7 @@ object ProcessorCommandHandler {
         error: String?,
         terminalLabel: String? = null,
         scrapePath: String = "",
+        retryable: Boolean = false,
     ): ProcessingResult = ProcessingResult(
         pipelineAction = PipelineAction.SKIP.name,
         fitScore       = 0,
@@ -432,6 +558,7 @@ object ProcessorCommandHandler {
         outputPath     = null,
         hasCoverLetter = false,
         error          = error,
+        retryable      = retryable,
         terminalLabel  = terminalLabel,
         // These items never reach ProcessingPipeline, so nothing else can record how their JD text
         // was fetched. A scrape that FAILED terminates right here — exactly the case the analyzer

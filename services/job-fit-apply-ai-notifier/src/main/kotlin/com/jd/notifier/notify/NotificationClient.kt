@@ -55,8 +55,18 @@ open class NotificationClient(
     internal fun discordMessagesUrl() =
         "${discordApiBase.trimEnd('/')}/api/v10/channels/$discordChannelId/messages"
 
-    internal fun telegramSendMessageUrl() =
-        "${telegramApiBase.trimEnd('/')}/bot$telegramToken/sendMessage"
+    internal fun telegramSendMessageUrl() = telegramMethodUrl("sendMessage")
+
+    /**
+     * Every Telegram call goes through here. The notifier shares the JobBot token but must never
+     * read updates: Telegram allows one `getUpdates` consumer per token, and that is the agent.
+     */
+    internal fun telegramMethodUrl(method: String): String {
+        require(method in TELEGRAM_METHODS) {
+            "the notifier may not call Telegram '$method' — the JobBot agent is the token's only update reader"
+        }
+        return "${telegramApiBase.trimEnd('/')}/bot$telegramToken/$method"
+    }
 
     open fun postDiscord(text: String): DeliveryResult {
         if (!discordConfigured) return DeliveryResult.SKIPPED
@@ -75,6 +85,38 @@ open class NotificationClient(
             val body = mapper.writeValueAsString(
                 mapOf("chat_id" to telegramChatId, "text" to chunk, "parse_mode" to "HTML")
             )
+            send("Telegram", telegramSendMessageUrl(), body) {}
+        }.worst()
+    }
+
+    /**
+     * The same ping, with inline buttons under it.
+     *
+     * Buttons ride on the **last** chunk only: the keyboard belongs to the end of the message,
+     * and attaching it to every chunk would stack duplicate keyboards on a long ping. An absent
+     * keyboard degrades to plain text rather than failing the send.
+     */
+    open fun postTelegramHtmlWithButtons(
+        text: String,
+        rows: List<List<TelegramButtons.Button>>,
+    ): DeliveryResult {
+        if (!telegramConfigured) return DeliveryResult.SKIPPED
+        val markup = TelegramButtons.replyMarkupJson(rows)
+        // An empty keyboard is a Telegram error, not an empty keyboard; degrade to plain text.
+        if (markup == null) return postTelegramHtml(text)
+        val chunks = chunkLines(text, 4096)
+        return chunks.mapIndexed { i, chunk ->
+            val fields = mutableMapOf<String, Any?>(
+                "chat_id" to telegramChatId,
+                "text" to chunk,
+                "parse_mode" to "HTML",
+            )
+            // readTree, not the raw string: assigning the JSON text directly makes Jackson emit
+            // reply_markup as a *quoted string*, which Telegram happens to accept but which is not
+            // the documented shape (a nested object). It also hides the keyboard from any consumer
+            // reading the body structurally — including this repo's own E2E sink.
+            if (i == chunks.lastIndex) fields["reply_markup"] = mapper.readTree(markup)
+            val body = mapper.writeValueAsString(fields.filterValues { it != null })
             send("Telegram", telegramSendMessageUrl(), body) {}
         }.worst()
     }
@@ -127,5 +169,10 @@ open class NotificationClient(
         }
         if (current.isNotEmpty()) chunks += current.toString()
         return chunks
+    }
+
+    companion object {
+        /** The only Telegram Bot API methods the notifier may call. */
+        val TELEGRAM_METHODS: Set<String> = setOf("sendMessage")
     }
 }

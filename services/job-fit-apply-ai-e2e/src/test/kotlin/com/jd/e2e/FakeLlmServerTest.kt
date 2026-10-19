@@ -48,6 +48,22 @@ class FakeLlmServerTest {
     @AfterAll
     fun stop() = server.stop()
 
+    @Test
+    @DisplayName("serves a static job page for URL-intake scenarios, long enough to avoid the browser fallback")
+    fun servesJobPage() {
+        val resp = http.send(
+            HttpRequest.newBuilder(URI.create("http://127.0.0.1:$port/e2e-jobs/abc123")).GET().build(),
+            HttpResponse.BodyHandlers.ofString(),
+        )
+        assertEquals(200, resp.statusCode())
+        assertTrue(resp.headers().firstValue("Content-Type").orElse("").startsWith("text/html"))
+        val text = resp.body().replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
+        assertTrue("URL_INTAKE_PAGE_MARKER posting abc123" in text)
+        // ScrapeJdNode retries thin pages (< PLAYWRIGHT_FALLBACK_MIN_CONTENT_LENGTH = 500) in a
+        // browser, which e2e does not have — the page must stay comfortably above that.
+        assertTrue(text.length > 1500, "page text is ${text.length} chars")
+    }
+
     private fun ask(prompt: String, model: String = "qwen3-test"): HttpResponse<String> {
         val body = mapper.writeValueAsString(
             mapOf("model" to model, "messages" to listOf(mapOf("role" to "user", "content" to prompt)))
@@ -242,6 +258,20 @@ class FakeLlmServerTest {
         assertEquals(72, mapper.readTree(content(third)).path("fit_score").asInt())
         // A failed call is still a call: exact-sequence assertions must survive an injected fault.
         assertEquals(listOf("score_fit", "score_fit", "score_fit"), server.calls.toList())
+    }
+
+    @Test
+    @DisplayName("each call's model is recorded alongside its route, and reset clears both")
+    fun callModelsAreRecordedIndexAligned() {
+        server.reset(mapOf("score_fit" to listOf(failure(429))))
+
+        ask("# SCORE_SKILL\n\nJOB DESCRIPTION:\nfixture", model = "e2e-cloud-score")
+        ask("# SCORE_SKILL\n\nJOB DESCRIPTION:\nfixture", model = "e2e-local-fallback")
+
+        assertEquals(listOf("score_fit", "score_fit"), server.calls.toList())
+        assertEquals(listOf("e2e-cloud-score", "e2e-local-fallback"), server.callModels.toList())
+        server.reset()
+        assertEquals(emptyList(), server.callModels.toList())
     }
 
     @Test

@@ -53,13 +53,17 @@ REAL_LLM        ?= 0
 # JVM) must agree, so it is exported once here.
 E2E_FAKE_LLM_PORT ?= $(if $(filter 1,$(REAL_LLM)),11436,21436)
 E2E_SINK_PORT     ?= 18099
+# The processor publishes its tap-to-sign-in port on the host (127.0.0.1:3100 in prod);
+# remap it so an e2e run cannot collide with the production processor.
+E2E_SIGNIN_PORT   ?= 13100
 # COMPOSE_PROFILES pinned empty: the repo-root .env sets COMPOSE_PROFILES=intake for
 # prod, and compose reads that .env regardless of project name — without the pin an
 # e2e `down`/`logs` (no explicit service list) would also consider poller/jsearch.
 E2E_ENV         := COMPOSE_PROJECT_NAME=$(E2E_PROJECT) \
                    COMPOSE_PROFILES= \
                    E2E_FAKE_LLM_PORT=$(E2E_FAKE_LLM_PORT) \
-                   E2E_SINK_PORT=$(E2E_SINK_PORT)
+                   E2E_SINK_PORT=$(E2E_SINK_PORT) \
+                   STEEL_SIGNIN_PORT=$(E2E_SIGNIN_PORT)
 COMPOSE_E2E     := $(E2E_ENV) docker compose -f docker-compose.yml -f docker-compose.e2e.yml
 
 # ── Source slice for the multi-instance scenarios (#56 sc. 9/10, gated on #51) ──
@@ -123,7 +127,7 @@ e2e: ## Full e2e cycle: up + run + down (REAL_LLM=1 for real local models)
 	  $(MAKE) e2e-up && $(MAKE) e2e-run REAL_LLM=$(REAL_LLM); s=$$?; $(MAKE) e2e-down; exit $$s
 
 e2e-up: ## Build + start the isolated e2e slice with fresh state, wait for health
-	./scripts/e2e-ci-prepare.sh --fresh
+	E2E_REAL_LLM=$(REAL_LLM) E2E_FAKE_LLM_PORT=$(E2E_FAKE_LLM_PORT) ./scripts/e2e-ci-prepare.sh --fresh
 	$(COMPOSE_E2E) up -d --build $(E2E_SERVICES)
 	@echo "[e2e] waiting for containers to report healthy…"
 	@for c in $(E2E_CONTAINERS); do \

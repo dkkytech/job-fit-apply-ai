@@ -3,10 +3,12 @@ package com.jd.poller.gmail
 /** The terminal Gmail label names the Processor emits (mirrors pipeline TerminalLabel). */
 object TerminalLabels {
     const val JD_ERROR            = "JD_Error"
+    const val JD_SCRAPE_FAILED    = "JD_Scrape_Failed"
     const val RECRUITER           = "Recruiter_Response_Required"
     const val JD_PROCESSED_DIGEST = "JD_Processed_Digest"
     const val JD_NOT_FOUND        = "JD_Not_Found"
     const val JD_PROCESSED        = "JD_Processed"
+    const val APPLICATION_UPDATE  = "JD_Application_Update"
     const val PROCESSING          = "Processing"      // in-flight, applied at intake (before we know it's a JD), cleared here
 }
 
@@ -26,6 +28,11 @@ object LabelApplier {
                 client.markUnread(messageId)
                 // Note: JD_Error intentionally does NOT clear a prior JD_Error.
             }
+            TerminalLabels.JD_SCRAPE_FAILED -> {
+                label(client, messageId, TerminalLabels.JD_SCRAPE_FAILED)
+                client.markUnread(messageId)
+                clearErrorLabel(client, messageId)
+            }
             TerminalLabels.RECRUITER -> {
                 label(client, messageId, TerminalLabels.RECRUITER)
                 client.starEmail(messageId)
@@ -39,6 +46,13 @@ object LabelApplier {
             }
             TerminalLabels.JD_NOT_FOUND -> {
                 label(client, messageId, TerminalLabels.JD_NOT_FOUND)
+                client.markUnread(messageId)
+                clearErrorLabel(client, messageId)
+            }
+            // Interview / status mail for a role in progress: needs the user's attention, so it stays
+            // in the inbox, unread — but it is not a posting and gets no resume.
+            TerminalLabels.APPLICATION_UPDATE -> {
+                label(client, messageId, TerminalLabels.APPLICATION_UPDATE)
                 client.markUnread(messageId)
                 clearErrorLabel(client, messageId)
             }

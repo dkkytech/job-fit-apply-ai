@@ -47,6 +47,9 @@ class IngestRunner(
                 SubmitJobRequest(
                     jdText = jd, roleTitle = l.jobTitle, company = l.employerName,
                     location = location, jobUrl = l.jobApplyLink, source = "JSEARCH", idempotencyKey = l.jobId,
+                    salaryRange = l.salaryRange(), remotePolicy = l.remotePolicy(),
+                    employmentType = l.employmentType(), yoeRequired = l.yoeRequired(),
+                    techStack = l.techStack(),
                 )
             )
             when {

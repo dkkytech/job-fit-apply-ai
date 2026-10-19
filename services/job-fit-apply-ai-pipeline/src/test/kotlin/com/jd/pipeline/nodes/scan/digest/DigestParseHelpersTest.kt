@@ -249,6 +249,14 @@ class DigestParseHelpersTest {
         }
 
         @Test
+        @DisplayName("Jobright: only /jobs/info/ posting pages, not the email's generic or recommendation links")
+        fun jobrightPostingPagesOnly() {
+            assertTrue(isEligibleJobUrl("https://jobright.ai/jobs/info/6a63ab620c8e2b4f36dcf19f?utm_source=1121", "jobright.ai"))
+            assertFalse(isEligibleJobUrl("https://jobright.ai/?retarget=jobalert", "jobright.ai"))
+            assertFalse(isEligibleJobUrl("https://jobright.ai/jobs/recommend?utm_source=1121&utm_medium=email", "jobright.ai"))
+        }
+
+        @Test
         @DisplayName("returns false for non-http URL")
         fun rejectsNonHttp() {
             assertFalse(isEligibleJobUrl("ftp://example.com/job", "example.com"))

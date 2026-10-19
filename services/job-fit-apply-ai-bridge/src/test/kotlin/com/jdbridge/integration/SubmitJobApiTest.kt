@@ -68,6 +68,32 @@ class SubmitJobValidationTest {
     }
 
     @Test
+    fun `scraped JD fields survive into the claimed jd_record`() = testApplication {
+        application { configureApplication() }
+        // Raw JSON, as the Processor's Jackson client sends it — not via SubmitJobRequest, which
+        // would hide a missing field behind a compile error instead of the silent runtime drop.
+        val response = client.post("/api/jobs") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"jd_text":"${"x".repeat(200)}","salary_range":"${'$'}101K/yr - ${'$'}127K/yr",
+                "remote_policy":"Remote","employment_type":"Full-time","seniority_level":"Lead/Staff",
+                "yoe_required":6,"tech_stack":["Test Automation Frameworks","CI/CD"]}""")
+        }
+        assertEquals(HttpStatusCode.Accepted, response.status)
+
+        val claim = Json.parseToJsonElement(client.get("/api/queue/claim").bodyAsText()).jsonObject
+        val record = claim["jd_record"]!!.jsonObject
+        assertEquals("\$101K/yr - \$127K/yr", record["salary_range"]?.jsonPrimitive?.content)
+        assertEquals("Remote", record["remote_policy"]?.jsonPrimitive?.content)
+        assertEquals("Full-time", record["employment_type"]?.jsonPrimitive?.content)
+        assertEquals("Lead/Staff", record["seniority_level"]?.jsonPrimitive?.content)
+        assertEquals(6, record["yoe_required"]?.jsonPrimitive?.int)
+        assertEquals(
+            listOf("Test Automation Frameworks", "CI/CD"),
+            record["tech_stack"]?.jsonArray?.map { it.jsonPrimitive.content },
+        )
+    }
+
+    @Test
     fun `submit with exactly 149 char jd_text returns 422`() = testApplication {
         application { configureApplication() }
         val response = client.post("/api/jobs") {

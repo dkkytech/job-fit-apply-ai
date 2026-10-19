@@ -42,6 +42,7 @@ You will receive:
 - **Forwarded messages**: If the email contains a "---------- Forwarded message ---------" header, treat the forwarded content as the primary job description source. The outer envelope message is recruiter commentary, not the JD.
 - **Conversation threads**: If the email is a reply thread showing multiple messages, focus on the most recent message and any attached or quoted job description. Earlier turns in the thread are context, not the JD, unless no JD appears in the latest message.
 - **Offer acceptance / onboarding logistics**: Emails confirming an accepted offer, providing onboarding instructions, shipping tracking numbers, pay rate confirmations, Beeline/MSP request numbers, or equipment delivery notices are `is_job_posting: false`.
+- **Application updates**: Emails about a role the candidate has **already applied to or is interviewing for** set `is_application_update: true` and `is_job_posting: false` — **even when the job description is attached or quoted**. This covers interview invitations, confirmations, scheduling and rescheduling ("You are confirmed for a video interview…", "Round 2 panel interview"), assessment or coding-test invites, application received / status / rejection notices, and offers. A recruiter pitching a new role is not an application update, even if it mentions a call.
 
 ## Output Format
 
@@ -57,7 +58,8 @@ Return ONLY valid JSON. No markdown fences, no preamble, no explanation.
   "yoe_required": number | null,
   "tech_stack": ["string", ...],
   "jd_text": "string (cleaned full JD text)",
-  "job_url": "string | null"
+  "job_url": "string | null",
+  "is_application_update": true | false
 }
 ```
 

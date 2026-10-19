@@ -24,12 +24,17 @@ export JFAA_ENV_FILE="$ROOT/$ENV_FILE"
 # shellcheck disable=SC1091
 . "$ROOT/scripts/jfaa-data-root.sh"
 
-# Instance identity: container names carry the prefix; intake services (poller/jsearch)
+# Instance identity: container names carry the prefix; intake services (poller/jsearch/watchlist)
 # exist only where COMPOSE_PROFILES activates them — a test instance sets it empty.
 P="${CONTAINER_PREFIX:-jobfit}"
 case "${COMPOSE_PROFILES-intake}" in
   *intake*) INTAKE=1 ;;
   *)        INTAKE=0 ;;
+esac
+# JobBot (the Telegram agent) runs only where COMPOSE_PROFILES activates `jobbot`.
+case "${COMPOSE_PROFILES-}" in
+  *jobbot*) JOBBOT=1 ;;
+  *)        JOBBOT=0 ;;
 esac
 
 FAILS=0
@@ -70,16 +75,30 @@ if [ "$INTAKE" = "1" ]; then
   if running "$P-poller"; then
     if [ "$(docker inspect -f '{{.State.Health.Status}}' "$P-poller" 2>/dev/null)" = "healthy" ]; then
       ok "poller ($P-poller) healthy — Gmail intake + write-back"
-    else warn "poller container up but not healthy (loops stalled?  →  docker logs $P-poller)"; fi
+    else warn "poller container up but not healthy (loops stalled, or Gmail auth rejected → --reauth?  →  docker logs $P-poller)"; fi
   else bad "poller ($P-poller) not running  →  make up"; fi
   if running "$P-jsearch"; then
     if [ "$(docker inspect -f '{{.State.Health.Status}}' "$P-jsearch" 2>/dev/null)" = "healthy" ]; then
       ok "jsearch ($P-jsearch) healthy — daily JSearch API intake"
     else warn "jsearch container up but not healthy (needs JSEARCH_API_KEY?  →  docker logs $P-jsearch)"; fi
   else warn "jsearch ($P-jsearch) not running  →  set JSEARCH_API_KEY in .env, then make up"; fi
+  if running "$P-watchlist"; then
+    if [ "$(docker inspect -f '{{.State.Health.Status}}' "$P-watchlist" 2>/dev/null)" = "healthy" ]; then
+      ok "watchlist ($P-watchlist) healthy — daily employer job-feed intake"
+    else warn "watchlist container up but not healthy  →  docker logs $P-watchlist"; fi
+    # Feeds rot quietly (rebrands, ATS moves) and a stuck run gate still looks healthy: summarize the
+    # last run — its age, failing feeds, and feeds that listed nothing (tools/test_health_summary.py).
+    # >>> watchlist-health
+    while IFS=$'\t' read -r level msg; do
+      case "$level" in ok) ok "$msg" ;; warn) warn "$msg" ;; esac
+    done < <(docker exec "$P-watchlist" cat /state/watchlist-health.json 2>/dev/null \
+      | python3 -I services/job-fit-apply-ai-watchlist/tools/health_summary.py \
+          --interval-ms "${WATCHLIST_INTERVAL_MS:-86400000}" --container "$P-watchlist" 2>/dev/null)
+    # <<< watchlist-health
+  else warn "watchlist ($P-watchlist) not running  →  make up"; fi
 else
-  ok "intake services (poller/jsearch) intentionally absent — COMPOSE_PROFILES has no 'intake' (jobs enter via make replay)"
-  if running "$P-poller" || running "$P-jsearch"; then
+  ok "intake services (poller/jsearch/watchlist) intentionally absent — COMPOSE_PROFILES has no 'intake' (jobs enter via make replay)"
+  if running "$P-poller" || running "$P-jsearch" || running "$P-watchlist"; then
     bad "intake container running for prefix $P but COMPOSE_PROFILES excludes intake — a second poller races prod on Gmail"
   fi
 fi
@@ -178,12 +197,67 @@ else
   else
     POLLER_SECRETS="$HOME/.local/share/jfaa/poller-secrets"
   fi
-  if [ -f "$POLLER_SECRETS/tokens/gmail_token.json" ]; then
-    # Warn if the token is stale (Testing-mode refresh token expires ~weekly).
-    if [ -n "$(find "$POLLER_SECRETS/tokens/gmail_token.json" -mtime +6 2>/dev/null)" ]; then
-      warn "Gmail token >6 days old — refresh soon: docker compose run --rm poller --reauth"
-    else ok "Gmail token present in poller secrets  ($POLLER_SECRETS)"; fi
+  TOKEN="$POLLER_SECRETS/tokens/gmail_token.json"
+  if [ -f "$TOKEN" ]; then
+    # The OAuth app is in Production, so the refresh token has no fixed lifetime and the file's
+    # age says nothing about its health. The poller rewrites the file only on re-auth (it keeps
+    # the mtime when persisting a rotated token), so the mtime is the consent date — context only.
+    ok "Gmail token present in poller secrets  ($POLLER_SECRETS; consented $(date -r "$TOKEN" '+%Y-%m-%d' 2>/dev/null || echo '?'))"
   else bad "Gmail token missing in $POLLER_SECRETS/tokens  →  docker compose run --rm poller --reauth"; fi
+  # Auth health comes from the poller: a rejected grant (at startup or on a mid-run refresh) leaves
+  # `<HEARTBEAT_FILE>.auth-failed` in the container (GmailAuth → Heartbeat.markAuthFailed) until a
+  # refresh or re-auth succeeds. A stopped poller is already reported under Compose services.
+  if running "$P-poller"; then
+    AUTH="$(docker exec "$P-poller" sh -c 'f="${HEARTBEAT_FILE:-/tmp/poller-heartbeat}.auth-failed"
+      if [ -e "$f" ]; then echo FAILED; cat "$f"; else echo OK; fi' 2>/dev/null)"
+    case "$AUTH" in
+      OK)      ok "Gmail auth healthy — poller reports no rejected grant" ;;
+      FAILED*) REASON="$(printf '%s\n' "$AUTH" | sed 1d)"
+               bad "poller reports Gmail auth dead: ${REASON:-Gmail auth failed}  →  docker compose run --rm poller --reauth" ;;
+      *)       warn "could not read Gmail auth state from $P-poller  →  docker logs $P-poller" ;;
+    esac
+  fi
+fi
+
+hdr "JobBot (Telegram agent for the JobBot bot — docs/jobbot.md)"
+if [ "$JOBBOT" != "1" ]; then
+  ok "skipped — COMPOSE_PROFILES has no 'jobbot'"
+else
+  for svc in jobbot-mcp jobbot; do
+    if running "$P-$svc"; then
+      if [ "$(docker inspect -f '{{.State.Health.Status}}' "$P-$svc" 2>/dev/null)" = "healthy" ]; then
+        ok "$svc ($P-$svc) healthy"
+      else warn "$svc container up but not healthy  →  docker logs $P-$svc"; fi
+    else bad "$svc ($P-$svc) not running  →  docker compose --profile jobbot up -d $svc"; fi
+  done
+  [ -n "${JOBBOT_MCP_TOKEN:-}" ] && ok "JOBBOT_MCP_TOKEN set" || bad "JOBBOT_MCP_TOKEN blank — jobbot-mcp refuses every request (openssl rand -hex 32)"
+  [ -n "${JOBBOT_TELEGRAM_ALLOWED_USERS:-}" ] && ok "JOBBOT_TELEGRAM_ALLOWED_USERS set" || bad "JOBBOT_TELEGRAM_ALLOWED_USERS blank — every tap is refused"
+  if [ -n "${JOBBOT_TELEGRAM_BOT_TOKEN:-}" ]; then
+    if curl -fsS -m 10 "https://api.telegram.org/bot${JOBBOT_TELEGRAM_BOT_TOKEN}/getMe" >/dev/null 2>&1; then
+      ok "JobBot token valid (getMe)"
+    else warn "JobBot token getMe failed (offline, or token revoked)"; fi
+    if [ -n "${NOTIFIER_TELEGRAM_BOT_TOKEN:-}" ] && [ "$JOBBOT_TELEGRAM_BOT_TOKEN" != "$NOTIFIER_TELEGRAM_BOT_TOKEN" ]; then
+      warn "JOBBOT_TELEGRAM_BOT_TOKEN differs from NOTIFIER_TELEGRAM_BOT_TOKEN — cards and taps would be on different bots"
+    fi
+  else bad "JOBBOT_TELEGRAM_BOT_TOKEN blank"; fi
+  [ "${JOBBOT_DRY_RUN:-false}" = "true" ] && warn "JOBBOT_DRY_RUN=true — taps are only logged"
+  if [ "${JOBBOT_APPLY_ENABLED:-false}" = "true" ]; then
+    case ",${COMPOSE_PROFILES-}," in *,jobbot-browser,*|*,apply,*) ;; *) bad "JOBBOT_APPLY_ENABLED=true but COMPOSE_PROFILES has no 'jobbot-browser' (no browser to fill in)";; esac
+    [ -n "${JOBBOT_BROWSER_PASSWORD:-${APPLY_BROWSER_PASSWORD:-}}" ] && ok "JOBBOT_BROWSER_PASSWORD set" || bad "JOBBOT_BROWSER_PASSWORD blank — jobbot-browser refuses to start"
+    [ -n "${APPLY_BROWSER_PASSWORD:-}${APPLY_BROWSER_USER:-}${JOBBOT_APPLY_VIEWER_URL:-}" ] && warn "old APPLY_BROWSER_* / JOBBOT_APPLY_VIEWER_URL names in .env — rename to JOBBOT_BROWSER_*"
+    if running "$P-jobbot-browser"; then
+      if [ "$(docker inspect -f '{{.State.Health.Status}}' "$P-jobbot-browser" 2>/dev/null)" = "healthy" ]; then
+        ok "jobbot-browser healthy (Chromium DevTools answering)"
+        docker exec "$P-jobbot-browser" test -f /etc/chromium/policies/managed/jobbot.json 2>/dev/null \
+          && ok "jobbot-browser sign-in policy present (Google web session survives restarts)" \
+          || warn "jobbot-browser has no BrowserSignin policy — the Google session is lost on every restart (rebuild the image)"
+      else warn "jobbot-browser up but not healthy  →  docker logs $P-jobbot-browser"; fi
+    else bad "jobbot-browser not running  →  docker compose --profile jobbot-browser up -d jobbot-browser"; fi
+  else ok "Apply not enabled — an Apply tap answers \"Not implemented yet\""; fi
+  # Telegram allows one getUpdates reader per token: the retired PM2 bot would fight the container (HTTP 409).
+  if command -v pm2 >/dev/null 2>&1 && pm2 jlist 2>/dev/null | python3 -c 'import json,sys; sys.exit(0 if any(p.get("name")=="nanobot-jobbot" and p.get("pm2_env",{}).get("status")=="online" for p in json.load(sys.stdin)) else 1)' 2>/dev/null; then
+    bad "pm2 nanobot-jobbot is online — it reads the same bot token as the jobbot container  →  pm2 stop nanobot-jobbot"
+  else ok "no competing update reader (pm2 nanobot-jobbot not online)"; fi
 fi
 
 hdr "PM2 (fully retired — everything is Compose now)"

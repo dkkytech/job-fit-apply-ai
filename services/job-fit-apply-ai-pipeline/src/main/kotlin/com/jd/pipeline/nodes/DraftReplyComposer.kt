@@ -17,8 +17,11 @@ import java.nio.file.Files
  */
 class DraftReplyComposer(
     private val generate: (String) -> String = { prompt ->
-        LlmClient.fromModelString(Config.DRAFT_REPLY_MODEL, jsonMode = false, temperature = 0.3, nodeKey = "draft_reply")
-            .call(prompt)
+        // 300s, not the 180s default: the prompt carries the full profile, and successful replies
+        // from the cloud draft model ran 40–164s (p95 ~147s), so 180s timed out about 1 in 5.
+        LlmClient.fromModelString(
+            Config.DRAFT_REPLY_MODEL, jsonMode = false, temperature = 0.3, timeoutSeconds = 300, nodeKey = "draft_reply",
+        ).call(prompt)
     },
 ) {
 

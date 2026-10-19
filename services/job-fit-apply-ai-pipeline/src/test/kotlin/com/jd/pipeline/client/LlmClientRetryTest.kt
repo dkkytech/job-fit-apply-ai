@@ -98,6 +98,26 @@ class LlmClientRetryTest {
     }
 
     @Test
+    @DisplayName("post preserves a temporary 503 as a typed transient failure")
+    fun temporary5xxIsTypedTransientFailure() {
+        val client = newClient()
+        val mockHttp = mock<HttpClient>()
+        val f503 = future(resp(503, "temporarily unavailable"))
+        whenever(mockHttp.sendAsync(any<HttpRequest>(), any<HttpResponse.BodyHandler<String>>()))
+            .thenReturn(f503)
+        injectHttp(client, mockHttp)
+
+        try {
+            invokePost(client)
+            fail("Expected transient failure for HTTP 503")
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            assertTrue(e.cause is TransientLlmFailure, "5xx must retain the typed retry signal: ${e.cause}")
+            assertTrue(e.cause!!.message!!.contains("503"))
+        }
+        verify(mockHttp, times(1)).sendAsync(any<HttpRequest>(), any<HttpResponse.BodyHandler<String>>())
+    }
+
+    @Test
     @DisplayName("post respects Retry-After header on 429")
     fun retry429WithRetryAfter() {
         val client = newClient()
@@ -158,6 +178,47 @@ class LlmClientRetryTest {
         } catch (e: java.lang.reflect.InvocationTargetException) {
             assertTrue(e.cause is RuntimeException)
             assertTrue(e.cause!!.message!!.contains("connection refused"), "message was: ${e.cause!!.message}")
+        }
+    }
+
+    @Test
+    @DisplayName("post raises a TransientLlmFailure when the request times out")
+    fun requestTimeoutIsTransient() {
+        // HttpRequest.timeout() fails the future with HttpTimeoutException("request timed out").
+        // That was a plain RuntimeException, so scan/score recorded it as a terminal JD_Error.
+        val client = newClient()
+        val mockHttp = mock<HttpClient>()
+        val failed = CompletableFuture<HttpResponse<String>>()
+        failed.completeExceptionally(java.net.http.HttpTimeoutException("request timed out"))
+        whenever(mockHttp.sendAsync(any<HttpRequest>(), any<HttpResponse.BodyHandler<String>>()))
+            .thenReturn(failed)
+        injectHttp(client, mockHttp)
+
+        try {
+            invokePost(client)
+            fail("Expected TransientLlmFailure from request timeout")
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            assertTrue(e.cause is TransientLlmFailure, "was: ${e.cause}")
+            assertTrue(e.cause!!.message!!.contains("request timed out"), "message was: ${e.cause!!.message}")
+        }
+    }
+
+    @Test
+    @DisplayName("post keeps a non-transport async failure non-transient")
+    fun nonIoAsyncFailureIsNotTransient() {
+        val client = newClient()
+        val mockHttp = mock<HttpClient>()
+        val failed = CompletableFuture<HttpResponse<String>>()
+        failed.completeExceptionally(IllegalArgumentException("bad header"))
+        whenever(mockHttp.sendAsync(any<HttpRequest>(), any<HttpResponse.BodyHandler<String>>()))
+            .thenReturn(failed)
+        injectHttp(client, mockHttp)
+
+        try {
+            invokePost(client)
+            fail("Expected RuntimeException from async failure")
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            assertTrue(e.cause !is TransientLlmFailure, "was: ${e.cause}")
         }
     }
 }

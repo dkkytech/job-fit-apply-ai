@@ -11,6 +11,9 @@ ${JFAA_DATA_ROOT}/pipeline-output
 ${JFAA_DATA_ROOT}/pipeline-state
 ```
 
+The `jobbot` profile (docs/jobbot.md) adds two more: `${JFAA_DATA_ROOT}/jobbot` and
+`${JFAA_DATA_ROOT}/jobbot-mcp-state`. Both are new — there is no legacy state to migrate.
+
 The Compose fallback for a fresh deployment is `${HOME}/.local/share/jfaa`.
 
 > **Upgrade required:** changing a Compose bind source does not move existing data. Before recreating
@@ -38,6 +41,11 @@ Each service-specific override wins over `JFAA_DATA_ROOT`, which wins over the p
 | `poller-secrets` | `JD_POLLER_SECRETS_HOST` | Poller `/secrets` RW | Gmail OAuth credentials/tokens |
 | `pipeline-output` | `JD_PIPELINE_OUTPUT_HOST` | Processor `/app/output` RW; Markserv `/data` RO | Resumes, cover letters, and reports |
 | `pipeline-state` | `JD_PIPELINE_STATE_HOST` | Processor `/app/state` RW | Steel/browser authenticated storage state |
+| `jobbot` | `JD_JOBBOT_HOME_HOST` | JobBot (Hermes) `/opt/data` RW | Agent sessions, memory, logs (profile `jobbot`) |
+| `jobbot-mcp-state` | `JD_JOBBOT_MCP_STATE_HOST` | jobbot-mcp `/state` RW | Action table, outbox, review screenshots |
+| `jobbot-templates` | `JD_JOBBOT_TEMPLATES_HOST` | jobbot-mcp `/templates` RW; Notifier `/templates` RO | The Telegram card template (`high-fit.html`) |
+| `jobbot-secrets` | `JD_JOBBOT_SECRETS_HOST` | jobbot-mcp `/secrets` RW | Site logins JobBot created (`site-credentials.json`, mode 600) |
+| `jobbot-browser` | `JD_JOBBOT_BROWSER_HOST` | jobbot-browser `/config` RW | JobBot's browser profile: site logins and the Google session (profile `jobbot-browser`). It was `apply-browser` before 2026-10-02 |
 
 `pipeline-state` must never be mounted into Markserv or served as an artifact. Keep the root,
 `poller-secrets`, and `pipeline-state` private on the host.

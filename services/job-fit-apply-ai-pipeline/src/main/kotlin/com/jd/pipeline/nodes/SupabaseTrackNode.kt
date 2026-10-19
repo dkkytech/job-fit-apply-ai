@@ -9,7 +9,8 @@ import com.jd.pipeline.state.emailIntake
 /**
  * Node: supabase_track
  *
- * Inserts the current job into the Supabase "tracks" table.
+ * Inserts the current job into the Supabase "tracks" table — or, on an on-demand tailor run
+ * ([JDState.existingTrackId]), updates the row its OFFER wrote, so the job keeps one row.
  * Uses the shared SupabaseClient (Jackson serialization, no hand-rolled toJson).
  * Parses the real row id from the return=representation response and stores it in
  * trackId for downstream reference.
@@ -27,7 +28,9 @@ class SupabaseTrackNode(
 
         return try {
             val record = buildRecord(input)
-            val row = supabase.insert("tracks", record)
+            val updated = input.existingTrackId?.let { supabase.update("tracks", record, "id", it.toString()) }
+            // The OFFER's row can be gone (pruned, or tracking failed back then): insert a fresh one.
+            val row = updated?.takeIf { it.path("id").asInt(0) > 0 } ?: supabase.insert("tracks", record)
             val id = row.path("id").asInt(0).takeIf { it > 0 }
 
             println("[supabase_track] Tracked successfully (id=${id ?: "unknown"})")

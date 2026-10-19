@@ -79,6 +79,20 @@ object Config {
     // Best local (oMLX): Qwen3.5-9B-OptiQ-4bit   Cloud: deepseek-v4-pro:ollama-cloud
     val SCORE_MODEL: String = get("SCORE_MODEL", "Qwen3.5-9B-OptiQ-4bit")
 
+    // When the cloud LLM quota is used up, the ingest/score lane (scan, digest, scrape, score_fit)
+    // switches to this local oMLX model instead of failing; tailoring stays cloud-only. Blank = off.
+    val LOCAL_FALLBACK_MODEL: String = get("LOCAL_FALLBACK_MODEL", "")
+    // Local models are slower than the cloud ones: the fallback gets at least this much time per call.
+    val LOCAL_FALLBACK_TIMEOUT_SECONDS: Long = get("LOCAL_FALLBACK_TIMEOUT_SECONDS", "300").toLongOrNull() ?: 300L
+    // After a quota refusal, skip the cloud for this long before trying it again.
+    /** Deferred tailoring: TAILOR_REQUESTs the release sweep keeps in flight once the quota is back. */
+    val DEFERRED_RELEASE_BATCH: Int = get("DEFERRED_RELEASE_BATCH", "2").toIntOrNull() ?: 2
+    /** How often the processor runs the release sweep (between jobs). */
+    val DEFERRED_RELEASE_INTERVAL_MINUTES: Long = get("DEFERRED_RELEASE_INTERVAL_MINUTES", "15").toLongOrNull() ?: 15L
+    /** A deferred job not tailored within this many days expires with a "tailor by hand" alert. */
+    val DEFERRED_MAX_AGE_DAYS: Int = get("DEFERRED_MAX_AGE_DAYS", "5").toIntOrNull() ?: 5
+    val CLOUD_QUOTA_RECHECK_MINUTES: Long = get("CLOUD_QUOTA_RECHECK_MINUTES", "30").toLongOrNull() ?: 30L
+
     // Cover letter: prose writing quality — a dedicated prose model pays off here
     // Best local (oMLX): gemma-4-12B-it-qat-4bit   Cloud: glm-5.1:ollama-cloud
     val COVER_LETTER_MODEL: String = get("COVER_LETTER_MODEL", "gemma-4-12B-it-qat-4bit")
@@ -102,6 +116,13 @@ object Config {
 
     // ── Scoring thresholds ───────────────────────────────────────────────────────
     val FIT_THRESHOLD: Float = get("FIT_THRESHOLD", "50").toFloat()
+    /**
+     * Fits at or above this are tailored automatically. Non-recruiter fits from FIT_THRESHOLD up to
+     * it are scored and OFFERed instead — pinged with a Tailor button, tailored only on a tap — so
+     * the expensive tailoring models are spent on the best fits. Blank means FIT_THRESHOLD: every
+     * fit is tailored, as before on-demand tailoring existed. Recruiter emails are always tailored.
+     */
+    val AUTO_TAILOR_MIN_SCORE: Float = get("AUTO_TAILOR_MIN_SCORE", "").toFloatOrNull() ?: FIT_THRESHOLD
     // ATS refinement pass: when the validation report is actionable (missing supported
     // must-haves, leaked unsupported terms, doubled words) or the overall score lands below
     // the threshold, the subgraph re-runs the rewrite nodes once with the concrete gap list
@@ -149,11 +170,13 @@ object Config {
 
     // ── Resume ───────────────────────────────────────────────────────────────────
     /** Canonical, candidate-authored résumé (structured YAML) — the source of all résumé content.
-     *  Gitignored (personal). Override with the RESUME_YAML_PATH env var to point elsewhere. */
-    val RESUME_YAML_PATH: Path = get("RESUME_YAML_PATH", "").let { override ->
-        if (override.isNotBlank()) Paths.get(override)
-        else PROJECT_DIR.resolve("src/main/resources/resume").resolve("resume.yaml")
-    }
+     *  Gitignored (personal). Override with the RESUME_YAML_PATH env var to point elsewhere
+     *  (e.g. a private profile repo checkout); unset falls back to the in-tree path. */
+    val RESUME_YAML_PATH: Path =
+        resolveProfilePath(
+            get("RESUME_YAML_PATH", ""),
+            PROJECT_DIR.resolve("src/main/resources/resume").resolve("resume.yaml"),
+        )
     /** Committed example résumé YAML — reference + `--init-profile` starting point. */
     val RESUME_YAML_TEMPLATE_PATH: Path = PROJECT_DIR.resolve("src/main/resources/resume").resolve("resume.template.yaml")
     /** Committed HTML head+CSS skeleton (with a `<!-- RESUME_BODY -->` sentinel) the deterministic renderer fills in. */
@@ -173,8 +196,14 @@ object Config {
     val RENDER_PDF_TIMEOUT_MS: Long = get("RENDER_PDF_TIMEOUT_MS", "180000").toLong()
 
     // ── User Profile ─────────────────────────────────────────────────────────────
-    /** Slim pipeline config (preferences + scoring aids). Gitignored — produced by `--init-profile`. */
-    val CANDIDATE_PROFILE_PATH: Path = PROJECT_DIR.resolve("config").resolve("candidate_profile.yaml")
+    /** Slim pipeline config (preferences + scoring aids). Gitignored — produced by `--init-profile`.
+     *  Override with the CANDIDATE_PROFILE_YAML_PATH env var to point elsewhere (e.g. a private
+     *  profile repo checkout); unset falls back to the in-tree path. */
+    val CANDIDATE_PROFILE_PATH: Path =
+        resolveProfilePath(
+            get("CANDIDATE_PROFILE_YAML_PATH", ""),
+            PROJECT_DIR.resolve("config").resolve("candidate_profile.yaml"),
+        )
 
     // ── Output ───────────────────────────────────────────────────────────────────
     val OUTPUT_DIR: Path = PROJECT_DIR.resolve("output")
@@ -210,12 +239,24 @@ object Config {
     // (proactive — for sites that soft-block or challenge plain HTTP, e.g. Glassdoor's Cloudflare).
     // Suffix match (a domain also matches its subdomains). Requires the debug Chrome to be up.
     val CDP_FORCE_DOMAINS: String = get("CDP_FORCE_DOMAINS", "")
+    // How long a site stays skipped after a site-wide block (403 / 429 / bot check) or an auth wall.
+    // The Processor is one long-lived loop, so without a lapse a single block used to skip that site
+    // until the next restart (Dice was skipped for 12 days in September). Default 30 min.
+    val SCRAPE_DOMAIN_SKIP_TTL_MS: Long = get("SCRAPE_DOMAIN_SKIP_TTL_MS", "1800000").toLong()
+    // An alert with a dedup key (e.g. "Sign-in required: LinkedIn") repeats at most this often while
+    // the condition persists. It used to fire once per process lifetime. Default 6 h.
+    val ALERT_REPEAT_AFTER_MS: Long = get("ALERT_REPEAT_AFTER_MS", "21600000").toLong()
     val PLAYWRIGHT_HEADLESS: Boolean = get("PLAYWRIGHT_HEADLESS", "false").toBoolean()
     // When true, sites blocked by HTTP (403, CAPTCHA, Cloudflare) are retried with a clean Playwright session.
     val PLAYWRIGHT_FALLBACK_ON_CAPTCHA: Boolean = get("PLAYWRIGHT_FALLBACK_ON_CAPTCHA", "true").toBoolean()
     // When true, pages that return fewer than PLAYWRIGHT_FALLBACK_MIN_CONTENT_LENGTH chars via HTTP
     // (JS-rendered SPAs like Jobright/Next.js) are retried with a clean Playwright session.
     val PLAYWRIGHT_FALLBACK_ON_THIN_CONTENT: Boolean = get("PLAYWRIGHT_FALLBACK_ON_THIN_CONTENT", "true").toBoolean()
+
+    // Job links come from untrusted email and from POST /api/urls, so the scraper refuses private
+    // network targets (localhost, the Docker host, metadata endpoints, tailnet devices). Only the
+    // e2e slice turns this on — it serves its test job page from the host.
+    val SCRAPE_ALLOW_PRIVATE_HOSTS: Boolean = get("SCRAPE_ALLOW_PRIVATE_HOSTS", "false").toBoolean()
     val PLAYWRIGHT_FALLBACK_MIN_CONTENT_LENGTH: Int = get("PLAYWRIGHT_FALLBACK_MIN_CONTENT_LENGTH", "500").toInt()
 
     // ── Steel Browser (self-hosted) ───────────────────────────────────────────────
@@ -301,7 +342,6 @@ object Config {
     /** API hosts, overridable so tests/e2e can point at a local sink. */
     val DISCORD_API_BASE: String  = get("DISCORD_API_BASE", "https://discord.com")
     val TELEGRAM_API_BASE: String = get("TELEGRAM_API_BASE", "https://api.telegram.org")
-    val NOTIFICATION_FIT_THRESHOLD: Int = get("NOTIFICATION_FIT_THRESHOLD", "50").toInt()
 
     // ── Liveness (container healthcheck) ─────────────────────────────────────────
     // The processor loop touches HEARTBEAT_FILE each iteration; `--health` exits 0 when it is
@@ -341,3 +381,14 @@ object Config {
         return value
     }
 }
+
+/**
+ * Resolve a profile file path: an explicit `override` wins, otherwise `defaultPath`.
+ *
+ * Pure and dependency-injected so the precedence rule is directly testable — the
+ * `Config.*` properties themselves are cached at object-init and read the process env,
+ * which a test cannot vary. A blank (or whitespace-only) override is treated as unset,
+ * matching `Config.get()`'s empty-value handling.
+ */
+internal fun resolveProfilePath(override: String?, defaultPath: Path): Path =
+    if (override.isNullOrBlank()) defaultPath else Paths.get(override.trim())

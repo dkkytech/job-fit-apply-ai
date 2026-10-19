@@ -7,6 +7,11 @@ and the rolling median so "regression" means a move off the trend, not just vs o
 
 Rates (error_rate, zero_score_rate, thin_digest_rate) are the comparable signals across
 variable-size cursor windows; raw counts vary with window size and are for evidence only.
+
+The median is weighted by each run's `window_jobs`. A run's rate is an estimate whose
+precision scales with the number of jobs behind it: a 1-job window reports a rate quantized
+to 0.0 or 1.0, and must not sway the trend as much as a 13-job window. Weighting is a strict
+generalization — with uniform window sizes it reduces to the plain median.
 """
 
 import json
@@ -67,10 +72,37 @@ def _median(vals):
     return vals[mid] if n % 2 else round((vals[mid - 1] + vals[mid]) / 2, 3)
 
 
-def baseline(history_file: Path, window: int = 10):
-    """Per-metric median over the last `window` recorded runs.
+def weighted_median(pairs):
+    """Job-weighted median of [(value, weight), ...]; None when there is no usable mass.
 
-    Returns {"runs": k, "window": N, "median": {metric: value, ...},
+    Weights are job counts. Identical to `_median` when every weight is equal, so history
+    written before variable-size windows existed is scored exactly as it was before.
+    """
+    pts = sorted((float(v), float(w)) for v, w in pairs
+                 if isinstance(v, (int, float)) and isinstance(w, (int, float)) and w > 0)
+    if not pts:
+        return None
+    half = sum(w for _, w in pts) / 2.0
+    cum = 0.0
+    for i, (v, w) in enumerate(pts):
+        cum += w
+        if cum > half:
+            return v
+        if cum == half:  # exact split — average across the boundary, as _median does
+            return round((v + (pts[i + 1][0] if i + 1 < len(pts) else v)) / 2, 3)
+    return pts[-1][0]
+
+
+def _jobs(row):
+    """A history row's job mass; rows predating the field count as one job."""
+    n = row.get("window_jobs")
+    return n if isinstance(n, (int, float)) and n > 0 else 1
+
+
+def baseline(history_file: Path, window: int = 10):
+    """Per-metric job-weighted median over the last `window` recorded runs.
+
+    Returns {"runs": k, "jobs": J, "window": N, "median": {metric: value, ...},
              "last": {metric: value, ...}} — or {} when there is no history yet.
     """
     hist = _read(history_file)
@@ -79,9 +111,10 @@ def baseline(history_file: Path, window: int = 10):
     recent = hist[-window:]
     med = {}
     for k in BASELINE_KEYS:
-        vals = [h.get("metrics", {}).get(k) for h in recent]
-        m = _median([v for v in vals if v is not None])
+        pairs = [(h.get("metrics", {}).get(k), _jobs(h)) for h in recent]
+        m = weighted_median([(v, w) for v, w in pairs if v is not None])
         if m is not None:
             med[k] = m
     last = {k: recent[-1].get("metrics", {}).get(k) for k in BASELINE_KEYS}
-    return {"runs": len(recent), "window": window, "median": med, "last": last}
+    return {"runs": len(recent), "jobs": sum(_jobs(h) for h in recent),
+            "window": window, "median": med, "last": last}

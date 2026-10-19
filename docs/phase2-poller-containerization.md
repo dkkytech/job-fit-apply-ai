@@ -79,8 +79,10 @@ poller:
 
 ## Risks / open questions
 
-- **Token-volume writability** — if the mount is read-only, the ~weekly refresh fails silently and
-  intake stops. Mount RW; doctor should check token freshness.
+- **Token-volume writability** — if the mount is read-only, `--reauth` cannot save a new token and a
+  rotated refresh token is lost on restart. Mount RW. The OAuth app is in Production, so the refresh
+  token has no fixed lifetime (Testing mode's 7-day expiry does not apply) — doctor reports the
+  Poller's auth-failure mark, not token age.
 - **Clock/refresh** — container time must be correct for OAuth refresh; Docker Desktop handles this.
 - **Timezone of the Gmail search query** (`newer_than:7d`) is Gmail-side, unaffected by the container.
 

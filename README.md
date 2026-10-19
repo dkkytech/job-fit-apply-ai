@@ -2,7 +2,7 @@
 
 A monorepo AI pipeline that automates the complete job search workflow: Gmail inbox scanning → email classification → digest fan-out → job scraping → fit scoring → resume tailoring → cover letter generation → PDF rendering → recruiter reply drafting → Postgres tracking → dashboard management. A Chrome extension extends the same pipeline to job boards encountered during normal browsing.
 
-Every service — **Postgres, the HTTP bridge, the artifact/markdown server, the dashboard, and the pipeline processor/poller/jsearch/notifier** — runs as a **Docker Compose** service; the tailnet-facing ones are exposed (and nothing else) via **Tailscale Serve**. Only the processor's browser/LLM dependencies (the logged-in Chrome/CDP, MLX, Ollama) stay on the host, reached from the container via `host.docker.internal`. Bring the whole stack up with `make up`; check it with `make doctor`.
+Every service — **Postgres, the HTTP bridge, the artifact/markdown server, the dashboard, and the pipeline processor/poller/jsearch/watchlist/notifier** — runs as a **Docker Compose** service; the tailnet-facing ones are exposed (and nothing else) via **Tailscale Serve**. Only the processor's browser/LLM dependencies (the logged-in Chrome/CDP, MLX, Ollama) stay on the host, reached from the container via `host.docker.internal`. Bring the whole stack up with `make up`; check it with `make doctor`.
 
 ---
 
@@ -18,6 +18,7 @@ flowchart TB
         GM["Gmail Inbox"]
         EXT["Chrome Extension<br/>(MV3) — JD extraction"]
         JS_API["JSearch API<br/>(RapidAPI)"]
+        ATS["Employer job feeds<br/>(Greenhouse · Workday · Ashby · Lever · RSS<br/>Oracle · Eightfold · SmartRecruiters · Jibe · Amazon<br/>Workable · Gem · Rippling · ADP · Phenom · TikTok<br/>HTML: iCIMS classic · Jobvite<br/>Apple · Capgemini · Alaska (DirectEmployers) · EPAM)"]
     end
 
     %% ---------------- Docker Compose ----------------
@@ -28,6 +29,7 @@ flowchart TB
             direction LR
             POLLER["poller (jobfit-poller)<br/>Gmail intake + write-back"]
             JSEARCH["jsearch (jobfit-jsearch)<br/>JSearch intake · daily / self-gated"]
+            WATCHLIST["watchlist (jobfit-watchlist)<br/>employer feeds · daily / self-gated"]
         end
 
         BRIDGE["bridge (jobfit-bridge) — Ktor · 127.0.0.1:8765<br/>SQLite job queue (claim/result) + artifact API<br/>+ Postgres-backed /api/tracks"]
@@ -61,9 +63,11 @@ flowchart TB
     %% ---------------- Edges ----------------
     GM -->|IMAP/OAuth| POLLER
     JS_API --> JSEARCH
+    ATS --> WATCHLIST
     EXT -->|submit JdRecord HTTP| BRIDGE
     POLLER -->|submit JdRecord| BRIDGE
     JSEARCH -->|submit JdRecord| BRIDGE
+    WATCHLIST -->|submit JdRecord| BRIDGE
 
     N1 <-->|"poll claim() / postResult()<br/>http://bridge:8765"| BRIDGE
     N7 -->|JDBC| DB
@@ -84,9 +88,9 @@ flowchart TB
     classDef host fill:#8957e522,stroke:#8957e5;
     classDef src fill:#23863622,stroke:#238636;
     classDef store fill:#9e6a0322,stroke:#d29922;
-    class POLLER,JSEARCH,BRIDGE,FRONT,MARK,NOTIFIER,N1,N2,N3,N4,N5,N6,N7,N8 container;
+    class POLLER,JSEARCH,WATCHLIST,BRIDGE,FRONT,MARK,NOTIFIER,N1,N2,N3,N4,N5,N6,N7,N8 container;
     class CDP,MLX,OLL host;
-    class GM,EXT,JS_API src;
+    class GM,EXT,JS_API,ATS src;
     class DB store;
 ```
 
@@ -94,7 +98,7 @@ flowchart TB
 
 | Service | Container | Host bind | Tailnet URL |
 |---|---|---|---|
-| Postgres | `jobfit-db` | `127.0.0.1:5432` | — (internal only) |
+| Postgres | `jobfit-db` | `${POSTGRES_BIND_ADDR:-127.0.0.1}:5432` | — (internal only; host clients use `127.0.0.1:5432`) |
 | Bridge (Ktor) | `jobfit-bridge` | `127.0.0.1:8765` | `http://<tailscale-name>:8765` |
 | Dashboard (nginx) | `jobfit-frontend` | `127.0.0.1:3030` | `http://<tailscale-name>:3030` |
 | Artifact server (markserv) | `jobfit-markserv` | `127.0.0.1:8081` | `http://<tailscale-name>:8081` |
@@ -218,11 +222,12 @@ npm run dev                     # http://localhost:3001
 
 | Process | Runs as | Command | Schedule |
 |---|---|---|---|
-| `db` / `bridge` / `frontend` / `markserv` / `processor` / `poller` / `jsearch` / `notifier` | Docker Compose | `make up` (`restart: unless-stopped`) | continuous |
+| `db` / `bridge` / `frontend` / `markserv` / `processor` / `poller` / `jsearch` / `watchlist` / `notifier` | Docker Compose | `make up` (`restart: unless-stopped`) | continuous |
 | Tailscale Serve (`:8765`,`:3030`,`:8081`) | host `tailscaled` | `scripts/setup-tailscale-serve.sh` | persisted across reboot |
 | `jobfit-processor` | Docker Compose | pipeline `--processor` (LLM pipeline, no Gmail) | continuous |
 | `jobfit-poller` | Docker Compose | poller `--poll` (Gmail intake + write-back) | continuous |
 | `jobfit-jsearch` | Docker Compose | jsearch `--once` (JSearch API intake) | daily (self-gated) |
+| `jobfit-watchlist` | Docker Compose | watchlist `--once` (employer job-feed intake; `--dry-run` previews) | daily (self-gated) |
 | `jobfit-notifier` | Docker Compose | notifier `--poll` (Discord/Telegram from the completed-event stream) | continuous |
 
 The containers and worker must be up before the cron jobs fire — run `make doctor` to confirm.
@@ -441,6 +446,6 @@ CI runs the test suites on every push to `main` and publishes a combined Allure 
 - **LinkedIn scraping requires a logged-in Chrome profile** reachable over CDP. Set `CHROME_PROFILE_DIRECTORY` / `CHROME_CDP_ENDPOINT` in `.env`.
 - **Local LLM quality scales with model size.** The 6-node tailoring subgraph produces significantly better results with dense ≥27B models; smaller models tend to hallucinate resume content.
 - **Containers are tailnet-only.** They bind `127.0.0.1` and are exposed via Tailscale Serve — not reachable from the LAN or the public internet. Run `make serve` if a service isn't reachable on the tailnet.
-- **Gmail OAuth tokens expire.** Refresh from the Poller container: `docker compose run --rm poller --reauth` (browser-free — it prints the consent URL, you paste the redirect URL back); `--check-token` verifies status without a full run.
+- **Gmail OAuth tokens can be revoked.** The OAuth app is in Production, so the refresh token has no fixed lifetime, but revoking access, a password change, or ~6 months unused kills it; `make doctor` reports a rejected grant. Re-auth from the Poller container: `docker compose run --rm poller --reauth` (browser-free — it prints the consent URL, you paste the redirect URL back); `--check-token` verifies status without a full run.
 - **Fit scores are LLM-generated and model-dependent.** Tune the scoring rubric in `SCORE_SKILL.md` until scores feel calibrated to your profile.
 - **Draft replies are not sent automatically.** Review every draft in Gmail before sending.

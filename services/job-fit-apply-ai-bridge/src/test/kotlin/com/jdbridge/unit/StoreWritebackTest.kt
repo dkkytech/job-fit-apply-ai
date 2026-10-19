@@ -103,6 +103,7 @@ class StoreWritebackTest {
             pipeline_action = "tailor", fit_score = 88,
             company = "Acme", role_title = "Staff SDET",
             job_url = "https://acme.co/job", artifact_url = "http://markserv/report/report.md",
+            track_id = 314,
         ))
         val job = completedJobs(0).single { it.job_id == id }
         assertEquals("Acme", job.company)
@@ -111,6 +112,54 @@ class StoreWritebackTest {
         assertEquals("tailor", job.pipeline_action)
         assertEquals("https://acme.co/job", job.job_url)
         assertEquals("http://markserv/report/report.md", job.artifact_url)
+        assertEquals(314, job.track_id)
+    }
+
+    @Test
+    fun `a skip reason round-trips through the feed, and a tailored job has none`() = runTest {
+        val skipped = enqueue("{}", null, "skip1")
+        recordResult(skipped, ResultRequest(
+            pipeline_action = "SKIP", fit_score = 63, company = "Sparksoft",
+            artifact_url = "http://markserv/20261002_sparksoft/", skip_reason = "Posted pay (max \$85K) is below the \$145K target",
+        ))
+        val job = completedJobs(0, all = true).single { it.job_id == skipped }
+        assertEquals("Posted pay (max \$85K) is below the \$145K target", job.skip_reason)
+        assertEquals("http://markserv/20261002_sparksoft/", job.artifact_url)
+
+        val tailored = enqueue("{}", null, "skip2")
+        recordResult(tailored, ResultRequest(pipeline_action = "TAILOR", fit_score = 80))
+        assertNull(completedJobs(0, all = true).single { it.job_id == tailored }.skip_reason)
+    }
+
+    @Test
+    fun `card details round-trip through the feed, and an old row has none`() = runTest {
+        val id = enqueue("{}", null, "card1")
+        recordResult(id, ResultRequest(
+            pipeline_action = "TAILOR", fit_score = 72, location = "Seattle, WA", remote_policy = "hybrid",
+            salary_range = "\$150K–\$180K", source = "jobright.ai",
+            strengths = listOf("Kotlin test infrastructure", "CI/CD ownership"), gaps = listOf("No Pact experience"),
+        ))
+        val job = completedJobs(0, all = true).single { it.job_id == id }
+        assertEquals("Seattle, WA", job.location)
+        assertEquals("hybrid", job.remote_policy)
+        assertEquals("\$150K–\$180K", job.salary_range)
+        assertEquals("jobright.ai", job.source)
+        assertEquals(listOf("Kotlin test infrastructure", "CI/CD ownership"), job.strengths)
+        assertEquals(listOf("No Pact experience"), job.gaps)
+
+        val bare = enqueue("{}", null, "card2")
+        recordResult(bare, ResultRequest(pipeline_action = "SKIP", fit_score = 10))
+        val old = completedJobs(0, all = true).single { it.job_id == bare }
+        assertNull(old.location)
+        assertEquals(emptyList(), old.strengths)
+        assertEquals(emptyList(), old.gaps)
+    }
+
+    @Test
+    fun `a result without track_id surfaces a null track_id`() = runTest {
+        val id = enqueue("{}", null, "ev3")
+        completeSkip(id)
+        assertNull(completedJobs(0).single { it.job_id == id }.track_id)
     }
 
     @Test

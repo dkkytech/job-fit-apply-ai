@@ -9,8 +9,8 @@ FROM eclipse-temurin:21-jre-jammy
 WORKDIR /app
 COPY --from=build /app/build/install/job-fit-apply-ai-poller/ /app/
 
-# Container defaults (compose overrides as needed). Gmail secrets mount at /secrets (RW so the
-# ~weekly token refresh persists); the heartbeat lives in /tmp for the --health check.
+# Container defaults (compose overrides as needed). Gmail secrets mount at /secrets (RW so --reauth
+# and a rotated refresh token persist); the heartbeat lives in /tmp for the --health check.
 ENV GMAIL_CREDENTIALS_FILE=/secrets/dkkytech_credentials.json \
     GMAIL_TOKEN_FILE=/secrets/tokens/gmail_token.json \
     HEARTBEAT_FILE=/tmp/poller-heartbeat \

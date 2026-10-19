@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0">
+  <channel>
+    <title><![CDATA[Aditi Consulting Jobs]]></title>
+    <link>https://www2.jobdiva.com/candidates/myjobs/searchjobsdone_outside.jsp?a=abc123token</link>
+    <description>Newly Issued Jobs</description>
+    <item>
+      <title><![CDATA[Optical Metrology and Test Engineer (26-06394) - WA - Redmond]]></title>
+      <link>https://www2.jobdiva.com/candidates/myjobs/openjob_outside.jsp?a=abc123token&amp;from=COMP&amp;id=29401111&amp;SearchString=test&amp;StatesString=&amp;t=1792010630011</link>
+      <description> <![CDATA[<strong>Payrate:</strong> $60 - $70/hr<br />&nbsp;<br /><strong>Responsibilities:</strong><ul><li>Build automated test fixtures for optical assemblies.</li></ul>]]></description>
+      <pubDate>October 14, 2026 12:49:00 PM EDT</pubDate>
+    </item>
+    <item>
+      <title><![CDATA[Test Technician (26-06380) - IA - Waterloo]]></title>
+      <link>https://www2.jobdiva.com/candidates/myjobs/openjob_outside.jsp?a=abc123token&amp;from=COMP&amp;id=29400001&amp;SearchString=test&amp;t=1792010630012</link>
+      <description><![CDATA[Run tests on tractors.]]></description>
+    </item>
+    <item>
+      <title><![CDATA[QA Lead - Remote]]></title>
+      <link>https://www2.jobdiva.com/candidates/myjobs/openjob_outside.jsp?a=abc123token&amp;compid=7&amp;id=29400002&amp;t=1792010630013</link>
+      <description><![CDATA[Lead QA for a remote team.]]></description>
+    </item>
+    <item>
+      <title><![CDATA[Broken item with no posting id (26-00001) - WA - Seattle]]></title>
+      <link>https://www2.jobdiva.com/candidates/myjobs/searchjobsdone_outside.jsp?a=abc123token</link>
+      <description><![CDATA[x]]></description>
+    </item>
+  </channel>
+</rss>

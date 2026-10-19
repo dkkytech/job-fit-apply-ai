@@ -1,5 +1,6 @@
 package com.jd.pipeline.client
 
+import com.jd.pipeline.config.Config
 import org.slf4j.LoggerFactory
 import java.time.Instant
 import java.time.ZoneId
@@ -25,13 +26,19 @@ data class Alert(
  * pipeline timed out, and so on.
  *
  * Transport is the shared [NotificationClient], so alerts are silent no-ops when no channel is
- * configured. [send] de-duplicates on an optional key for the lifetime of the process, so a
- * condition that recurs across many jobs in one run alerts once instead of spamming.
+ * configured. [send] de-duplicates on an optional key for [repeatAfterMs], so a condition that
+ * recurs across many jobs alerts once instead of spamming — and, because the Processor runs for
+ * days, alerts again later if the condition is still there instead of going silent for good.
  */
-class AlertService(private val client: NotificationClient = NotificationClient()) {
+class AlertService(
+    private val client: NotificationClient = NotificationClient(),
+    private val repeatAfterMs: Long = Config.ALERT_REPEAT_AFTER_MS,
+    // Monotonic clock seam (nanos) so the repeat window is testable without waiting.
+    private val nanoTime: () -> Long = System::nanoTime,
+) {
 
     private val log = LoggerFactory.getLogger(AlertService::class.java)
-    private val seen = mutableSetOf<String>()
+    private val lastSent = mutableMapOf<String, Long>()
 
     private fun now(): String = DateTimeFormatter
         .ofPattern("yyyy-MM-dd HH:mm z")
@@ -40,13 +47,18 @@ class AlertService(private val client: NotificationClient = NotificationClient()
 
     /**
      * Dispatch [alert] to every configured channel. When [dedupKey] is non-null, repeated alerts
-     * with the same key are suppressed for the lifetime of this process.
+     * with the same key are suppressed until [repeatAfterMs] has passed since the last one sent.
      */
     @Synchronized
     fun send(alert: Alert, dedupKey: String? = null) {
-        if (dedupKey != null && !seen.add(dedupKey)) {
-            log.debug("Alert suppressed (already sent this run): {}", dedupKey)
-            return
+        if (dedupKey != null) {
+            val now = nanoTime()
+            val last = lastSent[dedupKey]
+            if (last != null && now - last < repeatAfterMs * 1_000_000) {
+                log.debug("Alert suppressed (sent within the last {} ms): {}", repeatAfterMs, dedupKey)
+                return
+            }
+            lastSent[dedupKey] = now
         }
         log.info("[alert] {} {} — {}", alert.severity.name, alert.title, alert.message)
 

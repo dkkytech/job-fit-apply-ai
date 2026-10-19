@@ -23,6 +23,7 @@ import javax.mail.internet.MimeMultipart
  */
 class GmailClient(
     private val service: Gmail = buildService(),
+    private val maxScanPerPass: Int = PollerConfig.INTAKE_MAX_SCAN,
 ) {
     private val parser = EmailParser
 
@@ -31,55 +32,86 @@ class GmailClient(
     // ── Intake ──────────────────────────────────────────────────────────────────
 
     /**
-     * Fetch unprocessed JD emails as [RawEmail]s (subject/body/html) to submit to the bridge.
-     * Skips reply messages in already-processed threads.
+     * Message ids already known to be skipped by intake (replies in processed threads, blank
+     * bodies). Both verdicts are stable for a given message, and the skipped message is never
+     * labeled — it keeps matching the intake query — so remembering it avoids a full-format
+     * re-fetch every pass. In-memory only and bounded; after a restart the ids are re-learned.
      */
-    fun fetchIntakeEmails(maxResults: Int = PollerConfig.GMAIL_MAX_EMAILS): List<RawEmail> {
+    private val knownSkipped: MutableSet<String> = java.util.Collections.newSetFromMap(
+        object : LinkedHashMap<String, Boolean>() {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>?) =
+                size > SKIP_CACHE_MAX
+        },
+    )
+
+    /**
+     * Fetch up to [batchSize] unprocessed JD emails as [RawEmail]s (subject/body/html) to submit
+     * to the bridge. Skips reply messages in already-processed threads and blank-body messages.
+     *
+     * Skipped messages are never labeled, so they keep matching the query and would crowd older
+     * unprocessed mail out of a single [batchSize]-sized listing. Instead, page through the
+     * newest-first results until [batchSize] processable messages are found, fetching at most
+     * [maxScanPerPass] messages and listing at most [MAX_LIST_PAGES] pages per pass.
+     */
+    fun fetchIntakeEmails(batchSize: Int = PollerConfig.INTAKE_BATCH_SIZE): List<RawEmail> {
         val emails = mutableListOf<RawEmail>()
         val processedLabelIds = getJdProcessedLabelIds()
+        var fetched = 0
+        var pageToken: String? = null
+        var pages = 0
 
-        val result = service.users().messages()
-            .list("me")
-            .setQ(PollerConfig.GMAIL_SEARCH_QUERY)
-            .setMaxResults(maxResults.toLong())
-            .execute()
-
-        val messages = result.messages ?: return emails
-
-        for (msgRef in messages) {
-            val msg = service.users().messages()
-                .get("me", msgRef.id)
-                .setFormat("full")
+        pages@ while (emails.size < batchSize && fetched < maxScanPerPass && pages < MAX_LIST_PAGES) {
+            val result = service.users().messages()
+                .list("me")
+                .setQ(PollerConfig.GMAIL_SEARCH_QUERY)
+                .setMaxResults(LIST_PAGE_SIZE.toLong())
+                .setPageToken(pageToken)
                 .execute()
+            pages++
 
-            val headers = extractHeaders(msg.payload)
-            val subject = headers["Subject"] ?: "(no subject)"
-            val from = headers["From"] ?: ""
-
-            if (headers["In-Reply-To"] != null && msg.threadId != null) {
-                if (isThreadAlreadyProcessed(msg.threadId, processedLabelIds)) {
-                    println("[gmail] Skipping reply in already-processed thread: $subject")
-                    continue
-                }
+            for (msgRef in result.messages.orEmpty()) {
+                if (emails.size >= batchSize || fetched >= maxScanPerPass) break@pages
+                if (msgRef.id in knownSkipped) continue
+                fetched++
+                val email = fetchProcessable(msgRef.id, processedLabelIds)
+                if (email == null) knownSkipped.add(msgRef.id) else emails.add(email)
             }
-
-            val parsed = parser.parse(msg)
-            val body = parsed.plainText
-            if (body.isBlank()) continue
-
-            emails.add(
-                RawEmail(
-                    messageId = msgRef.id,
-                    subject   = subject,
-                    from      = from,
-                    body      = body,
-                    htmlBody  = parsed.htmlBodies.firstOrNull().orEmpty(),
-                    // The Processor's scan node determines recruiter status; no hint from intake.
-                    isRecruiterHint = false,
-                )
-            )
+            pageToken = result.nextPageToken ?: break
         }
         return emails
+    }
+
+    /** Fetch one message; null when intake skips it (processed-thread reply or blank body). */
+    private fun fetchProcessable(messageId: String, processedLabelIds: Set<String>): RawEmail? {
+        val msg = service.users().messages()
+            .get("me", messageId)
+            .setFormat("full")
+            .execute()
+
+        val headers = extractHeaders(msg.payload)
+        val subject = headers["Subject"] ?: "(no subject)"
+        val from = headers["From"] ?: ""
+
+        if (headers["In-Reply-To"] != null && msg.threadId != null) {
+            if (isThreadAlreadyProcessed(msg.threadId, processedLabelIds)) {
+                println("[gmail] Skipping reply in already-processed thread: $subject")
+                return null
+            }
+        }
+
+        val parsed = parser.parse(msg)
+        val body = parsed.plainText
+        if (body.isBlank()) return null
+
+        return RawEmail(
+            messageId = messageId,
+            subject   = subject,
+            from      = from,
+            body      = body,
+            htmlBody  = parsed.htmlBodies.firstOrNull().orEmpty(),
+            // The Processor's scan node determines recruiter status; no hint from intake.
+            isRecruiterHint = false,
+        )
     }
 
     private fun getJdProcessedLabelIds(): Set<String> {
@@ -87,7 +119,9 @@ class GmailClient(
             "JD_Processed",
             "JD_Processed_Digest",
             "JD_Not_Found",
-            "Recruiter_Response_Required"
+            "JD_Scrape_Failed",
+            "Recruiter_Response_Required",
+            "JD_Application_Update",
         )
         val labelsResponse = service.users().labels().list("me").execute()
         return labelsResponse.labels
@@ -238,6 +272,13 @@ class GmailClient(
     }
 
     companion object {
+        /** Ids per `messages.list` page (Gmail allows up to 500; ids only, so pages are cheap). */
+        internal const val LIST_PAGE_SIZE = 100
+        /** Hard bound on list calls per intake pass, independent of how many ids are cached as skipped. */
+        internal const val MAX_LIST_PAGES = 10
+        /** Bound on remembered skipped ids (a week of skipped inbox mail fits comfortably). */
+        internal const val SKIP_CACHE_MAX = 5_000
+
         private fun buildService(): Gmail {
             val credential = GmailAuth.getCredentials()
             return Gmail.Builder(

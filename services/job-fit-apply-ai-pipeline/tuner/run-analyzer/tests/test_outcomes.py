@@ -17,9 +17,11 @@ RUNS = ["20260101_000000", "20260101_010000", "20260101_020000",
 MERGED_TS = "2026-01-01T02:30:00Z"
 
 
-def _write_history(path, rates):
+def _write_history(path, rates, window_jobs=10):
+    """Full-size windows by default, so each side of the merge clears MIN_RESOLVE_JOBS."""
     for ts, rate in zip(RUNS, rates):
-        history.append(path, ts, 0, 1, 5, {"zero_score_rate": rate, "error_rate": 0.0})
+        history.append(path, ts, 0, 1, window_jobs,
+                       {"zero_score_rate": rate, "error_rate": 0.0})
 
 
 def _write_autofix(path, fp, status, merged_ts=None):
@@ -41,9 +43,18 @@ class TestParsing(unittest.TestCase):
         self.assertIsNone(outcomes._run_ts_epoch("not-a-ts"))
         self.assertIsNone(outcomes._iso_epoch(None))
 
-    def test_median(self):
-        self.assertEqual(outcomes._median([0.4, 0.4, 0.4]), 0.4)
-        self.assertIsNone(outcomes._median([]))
+    def test_mass_window_needs_both_runs_and_jobs(self):
+        rows = [(0.1, 4), (0.2, 4), (0.3, 4)]              # 3 runs but only 12 jobs
+        self.assertIsNone(outcomes._mass_window(rows, k=3, min_jobs=30))
+        self.assertEqual(outcomes._mass_window(rows, k=3, min_jobs=12), rows)
+        # Stops as soon as both thresholds are met, rather than consuming every run.
+        big = [(0.1, 30), (0.2, 30), (0.3, 30), (0.4, 30)]
+        self.assertEqual(len(outcomes._mass_window(big, k=3, min_jobs=30)), 3)
+
+    def test_mass_window_from_end_takes_runs_nearest_the_merge(self):
+        rows = [(0.9, 30), (0.1, 30), (0.2, 30)]
+        picked = outcomes._mass_window(rows, k=1, min_jobs=30, from_end=True)
+        self.assertEqual(picked, [(0.2, 30)])              # newest, not oldest
 
 
 class TestCheckOutcomes(unittest.TestCase):
@@ -86,6 +97,57 @@ class TestCheckOutcomes(unittest.TestCase):
         _write_autofix(self.autofix, "fp1", "pr_merged", MERGED_TS)
         fl = {"fp1": {"fingerprint": "fp1", "category": "scoring", "status": "resolved"}}
         self.assertEqual(outcomes.check_outcomes(fl, self.autofix, self.hist, k=3)["resolved"], [])
+
+    def test_tiny_post_merge_windows_do_not_auto_resolve(self):
+        """Regression: three one-job windows must not retire a finding on 3 jobs of evidence.
+
+        Removing the accumulate-until-N cadence gate made every non-empty cursor delta its
+        own run, so `k` post-merge *runs* no longer implies a meaningful number of *jobs*.
+        A one-job window's rate is quantized to 0.0/1.0, so three lucky jobs would otherwise
+        clear IMPROVE_FACTOR outright.
+        """
+        for ts, rate in zip(RUNS[:3], [0.4, 0.4, 0.4]):        # 3 x 10 jobs @ 0.4 before
+            history.append(self.hist, ts, 0, 1, 10, {"zero_score_rate": rate})
+        for ts in RUNS[3:]:                                     # 3 x 1 job @ 0.0 after
+            history.append(self.hist, ts, 0, 1, 1, {"zero_score_rate": 0.0})
+        _write_autofix(self.autofix, "fp1", "pr_merged", MERGED_TS)
+
+        oc = outcomes.check_outcomes(self.fl, self.autofix, self.hist, k=3)
+        self.assertEqual(oc, {"resolved": [], "regressed": []})
+
+    def test_resolves_once_post_merge_job_mass_arrives(self):
+        """The same finding resolves normally once real windows accumulate."""
+        for ts, rate in zip(RUNS[:3], [0.4, 0.4, 0.4]):
+            history.append(self.hist, ts, 0, 1, 10, {"zero_score_rate": rate})
+        for ts in RUNS[3:]:
+            history.append(self.hist, ts, 0, 1, 10, {"zero_score_rate": 0.1})
+        _write_autofix(self.autofix, "fp1", "pr_merged", MERGED_TS)
+
+        oc = outcomes.check_outcomes(self.fl, self.autofix, self.hist, k=3)
+        self.assertEqual(oc["resolved"], ["fp1"])
+
+    def test_thin_pre_merge_history_also_defers(self):
+        """A credible before-side is required too, not just an after-side."""
+        for ts, rate in zip(RUNS[:3], [0.4, 0.4, 0.4]):        # only 3 jobs before the merge
+            history.append(self.hist, ts, 0, 1, 1, {"zero_score_rate": rate})
+        for ts in RUNS[3:]:
+            history.append(self.hist, ts, 0, 1, 10, {"zero_score_rate": 0.1})
+        _write_autofix(self.autofix, "fp1", "pr_merged", MERGED_TS)
+
+        oc = outcomes.check_outcomes(self.fl, self.autofix, self.hist, k=3)
+        self.assertEqual(oc, {"resolved": [], "regressed": []})
+
+    def test_min_jobs_is_tunable(self):
+        """Lowering the floor restores the old run-count-only behaviour for small setups."""
+        for ts, rate in zip(RUNS[:3], [0.4, 0.4, 0.4]):
+            history.append(self.hist, ts, 0, 1, 1, {"zero_score_rate": rate})
+        for ts in RUNS[3:]:
+            history.append(self.hist, ts, 0, 1, 1, {"zero_score_rate": 0.0})
+        _write_autofix(self.autofix, "fp1", "pr_merged", MERGED_TS)
+
+        self.assertEqual(
+            outcomes.check_outcomes(self.fl, self.autofix, self.hist, k=3, min_jobs=3)["resolved"],
+            ["fp1"])
 
     def test_scraping_finding_is_not_resolved_from_zero_hard_error_rate(self):
         # Scrape failures may deliberately fall back to email snippets, leaving hard errors at

@@ -32,6 +32,17 @@ sealed interface IntakeContext {
         override val provenance: String = "test"
     }
 
+    /**
+     * A posting known only by its link (POST /api/urls): a job-alert email rule or an HTML careers
+     * board found the URL; the Processor scrapes it. [source] is the submitter's tag (EMAIL, CAREER_SITE…).
+     */
+    data class Link(
+        val url: String,
+        val source: String,
+    ) : IntakeContext {
+        override val provenance: String = "url"
+    }
+
     /** A page captured by the browser extension in the user's authenticated session. */
     data class WebCapture(
         val url: String,

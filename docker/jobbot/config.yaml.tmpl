@@ -1,0 +1,72 @@
+# JobBot's Hermes config. Rendered into /opt/data/config.yaml on every container start by
+# /opt/jobbot/seed.py (the dollar-brace placeholders come from the container environment), so edits made
+# inside the container never persist. Change this file and rebuild instead.
+
+model:
+  provider: ollama
+  default: ${JOBBOT_MODEL}
+
+custom_providers:
+  - name: ollama
+    base_url: ${JOBBOT_OLLAMA_URL}
+    api_mode: chat_completions
+  - name: mlx
+    base_url: ${JOBBOT_MLX_URL}
+    api_key: ${JOBBOT_MLX_KEY}
+    api_mode: chat_completions
+
+# The local oMLX model answers when Ollama Cloud is down.
+fallback_providers:
+  - provider: mlx
+    model: ${JOBBOT_FALLBACK_MODEL}
+    base_url: ${JOBBOT_MLX_URL}
+    api_key: ${JOBBOT_MLX_KEY}
+
+# Only these tools reach the model on Telegram: research, memory, clarifying questions,
+# session recall, and the read-only JFAA MCP tools. No shell, files, browser, code execution,
+# subagents, cron or skill editing.
+platform_toolsets:
+  telegram: [web, memory, clarify, session_search, mcp-jfaa]
+agent:
+  disabled_toolsets: [terminal, file, code_execution, browser, delegation, cronjob, skills, computer_use, kanban, homeassistant, image_gen, video_gen, tts, connections, todo]
+
+mcp_servers:
+  jfaa:
+    url: ${JOBBOT_MCP_URL}/mcp
+    headers:
+      Authorization: "Bearer ${JOBBOT_MCP_TOKEN}"
+    timeout: 60
+    connect_timeout: 15
+    tools:
+      include: [get_job, list_high_fit, read_job_file, list_tracks, get_profile, get_track_timeline, add_track_note, set_track_status, get_job_email, get_reply_draft, write_reply_draft, request_send_approval, get_alert_template, preview_alert_template, update_alert_template, revert_alert_template]
+
+approvals:
+  mode: manual
+  cron_mode: deny
+  timeout: 600
+
+security:
+  allow_private_urls: false
+  redact_secrets: true
+
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+
+plugins:
+  enabled: [jobbot_actions]
+
+curator:
+  enabled: false
+
+skills:
+  write_approval: true
+
+display:
+  platforms:
+    telegram:
+      streaming: true
+
+platforms:
+  api_server:
+    enabled: false

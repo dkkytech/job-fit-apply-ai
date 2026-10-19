@@ -74,6 +74,7 @@ class HappyPathE2ETest {
             Executable { assertEquals(result.company, result.apiTrack.path("company").asText()) },
             Executable { discordMessageDelivered(result) },
             Executable { completedFeedHasJob(result) },
+            Executable { completedEventLinksTrackHistory(result) },
         ),
     )
 
@@ -146,6 +147,21 @@ class HappyPathE2ETest {
         assertTrue(result.completedEvent.path("completed_seq").asLong() > result.completedCursor)
     }
 
+    /** The feed's track_id is the job's `tracks` row, and that row's event history is writable. */
+    private fun completedEventLinksTrackHistory(result: ScenarioResult) {
+        val trackId = result.apiTrack.path("id").asInt()
+        assertEquals(trackId, result.completedEvent.path("track_id").asInt(-1), "completed event track_id ≠ /api/tracks id")
+        assertEquals(trackId, result.finalStatus.path("track_id").asInt(-1), "job status track_id ≠ /api/tracks id")
+
+        val eventsUrl = "${E2eConfig.bridgeUrl}/api/tracks/$trackId/events"
+        val (code, body) = harness.postForResponse(eventsUrl, """{"kind":"note","summary":"e2e note","source":"e2e"}""")
+        assertEquals(201, code, "POST $eventsUrl → $code: $body")
+        val newest = harness.mapper.readTree(harness.getString(eventsUrl)).first()
+        assertEquals("note", newest.path("kind").asText())
+        assertEquals("e2e note", newest.path("summary").asText())
+        assertEquals(trackId, newest.path("track_id").asInt(-1))
+    }
+
     private fun exactCallSequence(result: ScenarioResult) {
         assertEquals(
             listOf(
@@ -175,8 +191,14 @@ class HappyPathE2ETest {
 
     private fun telegramHighFitDelivered(result: ScenarioResult) {
         val message = result.telegramMessages.single()
-        assertTrue(message.startsWith("High-fit:"), "unexpected Telegram format: $message")
-        assertTrue(Regex("""—\s*72\s*$""").containsMatchIn(message), "Telegram message has wrong score: $message")
+        val lines = message.lines()
+        // "Company: Title (score)" — no "High-fit:" prefix since the card redesign.
+        assertTrue(lines.first().startsWith("${result.company}: "), "unexpected Telegram format: $message")
+        assertTrue(Regex("""\(72\)\s*$""").containsMatchIn(lines.first()), "Telegram message has wrong score: $message")
+        assertTrue(lines.contains("Fit:") && lines.any { it.startsWith("Gap: ") }, "card details missing: $message")
+        // The job reference the JobBot agent resolves replies and button taps against.
+        val seq = result.completedEvent.path("completed_seq").asLong()
+        assertEquals("#J$seq", lines.last(), "Telegram ping must end with its job reference: $message")
     }
 
     private fun artifactUrl(result: ScenarioResult): String =

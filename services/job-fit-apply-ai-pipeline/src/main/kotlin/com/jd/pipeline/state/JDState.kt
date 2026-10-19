@@ -64,6 +64,8 @@ data class JDState(
     // Extracted JD compensation range and work arrangement for deterministic preference comparison
     val postedCompMin: Int? = null,
     val postedCompMax: Int? = null,
+    // Unit of postedCompMin/Max: "year" (annual USD) or "hour" (USD per hour); blank when the model didn't say
+    val postedCompPeriod: String = "",
     val workArrangement: String = "unknown",
     val officeLocation: String = "",
     // LLM confidence in the scoring (0.0–1.0); low values flag vague JDs for human review
@@ -76,6 +78,8 @@ data class JDState(
 
     // ── Tailor node output ────────────────────────────────────────────────────
     val outputPath: String = "",
+    /** Where score_fit.txt was written: a skipped high fit's scoring notes go beside it. */
+    val scoreOutputPath: String = "",
     val artifactUrl: String = "",
     val metadataUrl: String = "",
     // Tailoring nodes that failed and fell back to base content (empty = fully generated).
@@ -87,12 +91,25 @@ data class JDState(
 
     // ── Supabase tracking output ──────────────────────────────────────────────
     val trackId: Int? = null,
+    /**
+     * Set on an on-demand tailor run (a TAILOR_REQUEST): the `tracks` row the original OFFER wrote.
+     * Tracking then updates that row instead of inserting a second one for the same job.
+     */
+    val existingTrackId: Int? = null,
     val isSupabaseTracked: Boolean = false,
     val isDuplicate: Boolean = false,
     val duplicateId: Int? = null,
 
     // ── Digest expansion ──────────────────────────────────────────────────────
     val digestJobs: List<JDState> = emptyList(),
+    /**
+     * A digest child known only by its link (an employer job-alert email): the processor submits it
+     * to the bridge's /api/urls under [postingKey] instead of scraping it here, so the bridge can
+     * drop a posting it already has before anything is scraped.
+     */
+    val submitAsUrl: Boolean = false,
+    /** The posting's dedupe identity for [submitAsUrl] children (see PostingLinks). */
+    val postingKey: String = "",
 
     // ── User Profile ────────────────────────���─────────────────────────────────
     // Loaded once from config/candidate_profile.json; available to all nodes.
@@ -103,6 +120,9 @@ data class JDState(
     val skippedReason: String = "",
     val isChromeSessionExpired: Boolean = false,
     val isRecruiterResponseRequired: Boolean = false,
+    // Interview scheduling / assessment / application-status mail about a role already in progress.
+    // Not a new posting even when the JD is attached: labelled JD_Application_Update and skipped.
+    val isApplicationUpdate: Boolean = false,
     val draftId: String = "",
     // Recruiter reply body, generated Gmail-free by the Processor. The Poller delivers it
     // (creates the Gmail draft) via the bridge completed feed. Empty when not a recruiter reply.

@@ -25,9 +25,12 @@ def compose_config(*files: Path, environment: dict[str, str]) -> dict:
         "JFAA_DATA_ROOT",
         "JD_PIPELINE_OUTPUT_HOST",
         "JD_PIPELINE_STATE_HOST",
+        "JD_WATCHLIST_STATE_HOST",
         "PIPELINE_ENV_FILE",
         "CONTAINER_PREFIX",
         "E2E_STATE_DIR",
+        # The browser's credentials: a developer's shell must not leak into the assertions.
+        "JOBBOT_BROWSER_PASSWORD", "JOBBOT_BROWSER_USER", "APPLY_BROWSER_PASSWORD", "APPLY_BROWSER_USER",
     ):
         env.pop(name, None)
     env.update(environment)
@@ -267,12 +270,12 @@ def test_instance_identity_parameterization() -> None:
     """CONTAINER_PREFIX/STEEL_PORT default to prod values; profiles gate the intake pair.
 
     Prod byte-compatibility: with no variables set, every container_name is jobfit-* and
-    steel publishes host port 3000 — and poller/jsearch exist only when COMPOSE_PROFILES
+    steel publishes host port 3000 — and poller/jsearch/watchlist exist only when COMPOSE_PROFILES
     activates `intake` (prod's .env sets it; a test instance leaves it empty).
     """
     prod = compose_config(BASE, environment={"COMPOSE_PROFILES": "intake"})
     services = prod["services"]
-    for name in ("db", "bridge", "frontend", "markserv", "poller", "jsearch", "steel", "processor", "notifier"):
+    for name in ("db", "bridge", "frontend", "markserv", "poller", "jsearch", "watchlist", "steel", "processor", "notifier"):
         actual = services[name]["container_name"]
         assert actual == f"jobfit-{name}", f"{name} container_name was {actual}"
     steel_ports = {p["published"] for p in services["steel"]["ports"]}
@@ -285,6 +288,7 @@ def test_instance_identity_parameterization() -> None:
     services = test_instance["services"]
     assert "poller" not in services, "poller must not exist without the intake profile"
     assert "jsearch" not in services, "jsearch must not exist without the intake profile"
+    assert "watchlist" not in services, "watchlist must not exist without the intake profile"
     assert services["bridge"]["container_name"] == "jobfit-test-bridge"
     steel_ports = {p["published"] for p in services["steel"]["ports"]}
     assert "23000" in steel_ports, f"STEEL_PORT must move the host port, got {steel_ports}"
@@ -310,6 +314,126 @@ def test_e2e_state_dir_moves_all_slice_state() -> None:
     assert f"{ROOT / '.e2e'}/" not in rendered, "a default-.e2e path leaked past E2E_STATE_DIR"
 
 
+
+def test_jobbot_profile_is_isolated() -> None:
+    """The jobbot profile: state under the data root, JFAA data read-only, and network isolation.
+
+    The agent container (jobbot) may only reach jobbot-mcp: it sits on the `jobbot` network
+    alone, so bridge/db/steel do not resolve from it. jobbot-mcp straddles both networks and is
+    the agent's only door into JFAA. Neither publishes a host port. Without the profile, neither
+    service exists, so a test instance or the e2e slice never starts them.
+    """
+    root = Path("/tmp/jfaa jobbot root")
+    config = compose_config(BASE, environment={"COMPOSE_PROFILES": "jobbot", "JFAA_DATA_ROOT": str(root)})
+    services = config["services"]
+    assert services["jobbot"]["container_name"] == "jobfit-jobbot"
+    assert services["jobbot-mcp"]["container_name"] == "jobfit-jobbot-mcp"
+
+    assert_mount(config, "jobbot", "/opt/data", root / "jobbot", read_only=False)
+    assert_mount(config, "jobbot-mcp", "/state", root / "jobbot-mcp-state", read_only=False)
+    assert_mount(config, "jobbot-mcp", "/jfaa/pipeline-output", root / "pipeline-output", read_only=True)
+    assert_mount(config, "jobbot-mcp", "/poller-secrets", root / "poller-secrets", read_only=True)
+    for target in ("/jfaa/profile/resume.yaml", "/jfaa/profile/candidate_profile.yaml"):
+        assert mounts(config, "jobbot-mcp")[target].get("read_only") is True, f"{target} must be read-only"
+    assert set(mounts(config, "jobbot")) == {"/opt/data"}, "the agent container mounts nothing but its own home"
+
+    assert set(services["jobbot"]["networks"]) == {"jobbot"}, services["jobbot"]["networks"]
+    assert set(services["jobbot-mcp"]["networks"]) == {"default", "jobbot", "jobbot-browser"}, services["jobbot-mcp"]["networks"]
+    assert_mount(config, "jobbot-mcp", "/secrets", root / "jobbot-secrets", read_only=False)
+    assert_mount(config, "jobbot-mcp", "/templates", root / "jobbot-templates", read_only=False)
+    assert_mount(config, "notifier", "/templates", root / "jobbot-templates", read_only=True)
+    for name in ("jobbot", "jobbot-mcp"):
+        assert not services[name].get("ports"), f"{name} must not publish ports"
+
+    plain = compose_config(BASE, environment={"COMPOSE_PROFILES": "intake"})["services"]
+    assert "jobbot" not in plain and "jobbot-mcp" not in plain, "jobbot services need the jobbot profile"
+    assert "jobbot-browser" not in plain, "JobBot's browser needs the jobbot-browser profile"
+
+    applied = compose_config(BASE, environment={"COMPOSE_PROFILES": "jobbot,jobbot-browser", "JFAA_DATA_ROOT": str(root)})
+    browser = applied["services"]["jobbot-browser"]
+    assert set(browser["networks"]) == {"jobbot-browser"}, "CDP must be reachable from jobbot-mcp only — never the agent"
+    assert "jobbot-browser" in applied["services"]["jobbot-mcp"]["networks"], "jobbot-mcp drives the browser"
+    assert "jobbot-browser" not in applied["services"]["jobbot"]["networks"], "the agent never reaches CDP"
+    assert_mount(applied, "jobbot-browser", "/config", root / "jobbot-browser", read_only=False)
+    published = {(p.get("host_ip"), p["published"], p["target"]) for p in browser["ports"]}
+    assert published == {("127.0.0.1", "3200", 3000)}, f"only the viewer, only on loopback: {published}"
+    assert browser["environment"]["PASSWORD"] == "", "no password configured here"
+
+    # The old names still work, so a not-yet-renamed .env keeps its browser and password.
+    legacy = compose_config(BASE, environment={"COMPOSE_PROFILES": "jobbot,apply", "JFAA_DATA_ROOT": str(root),
+                                               "APPLY_BROWSER_PASSWORD": "old-secret", "APPLY_BROWSER_USER": "olduser"})
+    old = legacy["services"]["jobbot-browser"]["environment"]
+    assert (old["PASSWORD"], old["CUSTOM_USER"]) == ("old-secret", "olduser"), old
+    renamed = compose_config(BASE, environment={"COMPOSE_PROFILES": "jobbot-browser", "JFAA_DATA_ROOT": str(root),
+                                                "JOBBOT_BROWSER_PASSWORD": "new-secret", "APPLY_BROWSER_PASSWORD": "old-secret"})
+    assert renamed["services"]["jobbot-browser"]["environment"]["PASSWORD"] == "new-secret", "the new name wins"
+
+    e2e = compose_config(BASE, E2E, environment={})["services"]
+    assert "jobbot" not in e2e and "jobbot-mcp" not in e2e, "the e2e slice must never start JobBot"
+
+
+def test_watchlist_state_follows_data_root() -> None:
+    """The watchlist's last-run gate and health file live under the data root (prod: the
+    /state volume doctor.sh reads), and JD_WATCHLIST_STATE_HOST overrides it on its own.
+    A test slice never polls employer feeds, and never touches production watchlist state.
+    """
+    root = Path("/tmp/JFAA Application Support")
+    config = compose_config(BASE, environment={"COMPOSE_PROFILES": "intake", "JFAA_DATA_ROOT": str(root)})
+    assert_mount(config, "watchlist", "/state", root / "watchlist-state", read_only=False)
+
+    override = Path("/tmp/custom watchlist state")
+    config = compose_config(
+        BASE,
+        environment={"COMPOSE_PROFILES": "intake", "JFAA_DATA_ROOT": str(root), "JD_WATCHLIST_STATE_HOST": str(override)},
+    )
+    assert_mount(config, "watchlist", "/state", override, read_only=False)
+
+    # Stale-feed alerts need the same channels as the processor's AlertService.
+    env = config["services"]["watchlist"].get("environment", {})
+    for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID"):
+        assert name in env, f"watchlist must receive {name} for stale-feed alerts"
+
+    # The e2e slice runs with COMPOSE_PROFILES pinned empty (Makefile E2E_ENV) — that, not the
+    # overlay's e2e-disabled profile (Compose unions profile lists), keeps it from polling feeds.
+    e2e = compose_config(BASE, E2E, environment={"COMPOSE_PROFILES": ""})["services"]
+    assert "watchlist" not in e2e, "the e2e slice must never poll employer feeds"
+    # And if someone does enable it there, its state stays inside the slice, not the data root.
+    e2e_intake = compose_config(BASE, E2E, environment={"COMPOSE_PROFILES": "intake", "JFAA_DATA_ROOT": str(root)})
+    assert_mount(e2e_intake, "watchlist", "/state", ROOT / ".e2e/watchlist-state", read_only=False)
+
+
+def test_e2e_prepare_scores_through_fake_cloud_unless_real_llm() -> None:
+    """The e2e pipeline dotenv routes score through a fake *cloud* model with a local fallback.
+
+    That is what lets the quota→local-fallback scenario run end to end. Under REAL_LLM=1 there
+    is no fake to play the cloud, so the lines must be absent (score stays on the local default),
+    and the cloud base URL must follow E2E_FAKE_LLM_PORT like MLX_LOCAL_BASE_URL does.
+    """
+    def prepare(**extra: str) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {k: v for k, v in os.environ.items() if not k.startswith("E2E_")}
+            env.update({"E2E_STATE_DIR": tmp, **extra})
+            subprocess.run([str(ROOT / "scripts/e2e-ci-prepare.sh")], cwd=ROOT, env=env, check=True, capture_output=True, text=True)
+            return (Path(tmp) / "pipeline.env").read_text()
+
+    fake = prepare(E2E_FAKE_LLM_PORT="24567")
+    assert "ARTIFACT_BASE_URL=" in fake, fake
+    assert "SCORE_MODEL=e2e-cloud-score:cloud" in fake, fake
+    assert "DEEPSEEK_BASE_URL=http://host.docker.internal:24567" in fake, fake
+    assert "LOCAL_FALLBACK_MODEL=e2e-local-fallback" in fake, fake
+    assert "CLOUD_QUOTA_RECHECK_MINUTES=0" in fake, fake
+    assert "DEEPSEEK_BASE_URL=http://host.docker.internal:21436" in prepare(), "default fake port"
+
+    real = prepare(E2E_REAL_LLM="1")
+    assert "ARTIFACT_BASE_URL=" in real, real
+    for key in ("SCORE_MODEL", "DEEPSEEK_BASE_URL", "LOCAL_FALLBACK_MODEL"):
+        assert key not in real, f"{key} must not be set under REAL_LLM=1: {real}"
+
+    makefile = (ROOT / "Makefile").read_text()
+    assert "E2E_REAL_LLM=$(REAL_LLM) E2E_FAKE_LLM_PORT=$(E2E_FAKE_LLM_PORT) ./scripts/e2e-ci-prepare.sh --fresh" in makefile, \
+        "make e2e-up must tell the prepare script whether a fake LLM is in play"
+
+
 def main() -> None:
     tests = (
         test_portable_fallback,
@@ -318,9 +442,12 @@ def main() -> None:
         test_harness_is_isolated_from_repository_dotenv,
         test_documented_exact_mirror_helper,
         test_e2e_overlay_replaces_production_sources,
+        test_jobbot_profile_is_isolated,
         test_pipeline_env_file_override,
         test_instance_identity_parameterization,
         test_e2e_state_dir_moves_all_slice_state,
+        test_watchlist_state_follows_data_root,
+        test_e2e_prepare_scores_through_fake_cloud_unless_real_llm,
     )
     for test in tests:
         test()

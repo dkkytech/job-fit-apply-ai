@@ -77,6 +77,25 @@ class NotifierBridgeClientHttpTest {
     }
 
     @Test
+    @DisplayName("fetchEvents maps the action fields the buttons depend on (message_id, is_recruiter, terminal_label)")
+    fun fetchEventsMapsActionFields() {
+        completedResponse = 200 to """
+            [{"job_id":"j1","completed_seq":7,"status":"done","message_id":"18f0c","is_recruiter":true,
+              "terminal_label":"Recruiter_Response_Required","draft_text":"Hi","company":"Acme"},
+             {"job_id":"j2","completed_seq":8,"status":"done","company":"Beta"}]
+        """.trimIndent()
+
+        val (rec, plain) = client.fetchEvents(since = 0, limit = 10)
+
+        assertEquals("18f0c", rec.messageId)
+        assertEquals(true, rec.isRecruiter)
+        assertEquals("Recruiter_Response_Required", rec.terminalLabel)
+        assertEquals(null, plain.messageId)
+        assertEquals(false, plain.isRecruiter)
+        assertEquals(null, plain.terminalLabel)
+    }
+
+    @Test
     @DisplayName("fetchEvents returns an empty list for an empty feed")
     fun fetchEventsEmpty() {
         completedResponse = 200 to "[]"

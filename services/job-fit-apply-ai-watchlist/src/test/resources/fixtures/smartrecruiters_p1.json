@@ -1,0 +1,5 @@
+{"offset":0,"limit":100,"totalFound":2,"content":[
+ {"id":"744000155377769","name":"QA Engineer","ref":"https://api.smartrecruiters.com/v1/companies/Acme1/postings/744000155377769",
+  "location":{"city":"Seattle","region":"WA","country":"us","remote":false,"fullLocation":"Seattle, WA, United States"}},
+ {"id":"744000155377770","name":"Support Specialist","ref":"https://api.smartrecruiters.com/v1/companies/Acme1/postings/744000155377770",
+  "location":{"city":"","country":"us","remote":true,"fullLocation":"United States"}}]}

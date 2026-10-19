@@ -113,4 +113,17 @@ class NotificationClientTest {
         assertEquals("http://host.docker.internal:18099/api/v10/channels/chan/messages", c.discordMessagesUrl())
         assertEquals("http://host.docker.internal:18099/bottg/sendMessage", c.telegramSendMessageUrl())
     }
+
+    @Test
+    @DisplayName("the client can build sendMessage and nothing else (JobBot owns getUpdates)")
+    fun onlySendMessageIsAllowed() {
+        val c = NotificationClient(discordToken = "", discordChannelId = "", telegramToken = "tok", telegramChatId = "c",
+            telegramApiBase = "https://api.example")
+        assertEquals("https://api.example/bottok/sendMessage", c.telegramSendMessageUrl())
+        assertEquals(setOf("sendMessage"), NotificationClient.TELEGRAM_METHODS)
+        listOf("getUpdates", "setWebhook", "deleteWebhook", "answerCallbackQuery", "editMessageText").forEach { m ->
+            val e = kotlin.runCatching { c.telegramMethodUrl(m) }.exceptionOrNull()
+            assertTrue(e is IllegalArgumentException, "$m must be refused, got $e")
+        }
+    }
 }

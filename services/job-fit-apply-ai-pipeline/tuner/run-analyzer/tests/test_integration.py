@@ -1,4 +1,4 @@
-"""Integration tests: the cadence gate (assemble_window) and the full main() flow.
+"""Integration tests: cursor-window assembly and the full main() flow.
 
 Hermetic — a fake bridge and a stubbed model, no network / LLM / live services. analyze.py
 reads required config from the environment at import time, so we set it before importing.
@@ -9,7 +9,6 @@ import json
 import os
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -25,7 +24,6 @@ os.environ.update({
     "SKILL_FILE": str(_RA / "RUN_ANALYZER_SKILL.md"),
     "PROMPT_FILE": str(_RA / "PROMPT.md"),
     "CURSOR_FILE": f"{_TMP}/cursor",
-    "PENDING_FILE": f"{_TMP}/pending",
     "METRICS_FILE": f"{_TMP}/last_metrics.json",
     "HISTORY_FILE": f"{_TMP}/history.jsonl",
     "FINDINGS_LEDGER_FILE": f"{_TMP}/findings_ledger.jsonl",
@@ -77,16 +75,13 @@ class FakeBridge:
         return FakeBridge.records[-int(n):]
 
 
-class GateTest(unittest.TestCase):
+class WindowTest(unittest.TestCase):
     def setUp(self):
         analyze.BridgeClient = lambda *a, **k: FakeBridge()
-        analyze.MIN_BATCH = 3
-        analyze.MAX_DEFER_HOURS = 6
         analyze.CONTEXT_N = 40
         FakeBridge.head = 100
         FakeBridge.records = [_job(s) for s in range(91, 101)]  # seq 91..100
-        for f in ("cursor", "pending"):
-            Path(f"{_TMP}/{f}").unlink(missing_ok=True)
+        Path(f"{_TMP}/cursor").unlink(missing_ok=True)
 
     def _decision(self):
         return analyze.assemble_window()[0]
@@ -99,25 +94,21 @@ class GateTest(unittest.TestCase):
         Path(f"{_TMP}/cursor").write_text("100")
         self.assertEqual(self._decision(), "empty")
 
-    def test_defer_small_fresh_batch(self):
-        Path(f"{_TMP}/cursor").write_text("98")   # 2 new (99,100) < MIN_BATCH 3
-        self.assertEqual(self._decision(), "defer")
-        self.assertEqual(Path(f"{_TMP}/cursor").read_text(), "98")   # cursor NOT advanced
-        self.assertTrue(Path(f"{_TMP}/pending").exists())            # marker set
-
-    def test_analyze_when_batch_reaches_min(self):
-        Path(f"{_TMP}/cursor").write_text("97")   # 3 new (98,99,100) == MIN_BATCH
+    def test_analyze_small_nonempty_batch_immediately(self):
+        Path(f"{_TMP}/cursor").write_text("98")   # only 2 new jobs
         decision, report, since, last, ctx = analyze.assemble_window()
         self.assertEqual(decision, "analyze")
-        self.assertEqual(len(report), 3)
+        self.assertEqual(len(report), 2)
         self.assertEqual(Path(f"{_TMP}/cursor").read_text(), "100")  # advanced
-        self.assertFalse(Path(f"{_TMP}/pending").exists())           # cleared
         self.assertEqual(len(ctx), 10)                               # context window (last N)
 
-    def test_force_by_time_past_max_defer(self):
-        Path(f"{_TMP}/cursor").write_text("98")                       # 2 new < MIN_BATCH
-        Path(f"{_TMP}/pending").write_text(repr(time.time() - 7 * 3600))  # waited 7h > 6h
-        self.assertEqual(self._decision(), "analyze")
+    def test_analyze_single_record_immediately(self):
+        Path(f"{_TMP}/cursor").write_text("99")
+        decision, report, since, last, _ = analyze.assemble_window()
+        self.assertEqual(decision, "analyze")
+        self.assertEqual(len(report), 1)
+        self.assertEqual((since, last), (99, 100))
+        self.assertEqual(Path(f"{_TMP}/cursor").read_text(), "100")
 
 
 class MainFlowTest(unittest.TestCase):
@@ -134,15 +125,13 @@ class MainFlowTest(unittest.TestCase):
     def setUp(self):
         analyze.BridgeClient = lambda *a, **k: FakeBridge()
         analyze.call_model = lambda *a, **k: self.STUB
-        analyze.MIN_BATCH = 2
         FakeBridge.head = 100
         FakeBridge.records = [_job(s) for s in range(91, 101)]
-        for f in ("cursor", "pending", "history.jsonl", "findings_ledger.jsonl"):
+        for f in ("cursor", "history.jsonl", "findings_ledger.jsonl"):
             Path(f"{_TMP}/{f}").unlink(missing_ok=True)
 
     def _run(self, run_ts):
-        Path(f"{_TMP}/cursor").write_text("97")     # 3 new >= MIN_BATCH -> analyze
-        Path(f"{_TMP}/pending").unlink(missing_ok=True)
+        Path(f"{_TMP}/cursor").write_text("97")
         analyze.RUN_TS = run_ts
         analyze.FINDINGS_DIR = Path(f"{_TMP}/findings/{run_ts}")
         rc = analyze.main()

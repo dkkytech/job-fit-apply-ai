@@ -7,6 +7,7 @@ import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import org.mockito.kotlin.doReturn
+import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 import java.nio.file.Path
@@ -39,10 +40,10 @@ class IntakeLoopRunForeverTest {
     fun beatsAndStopsOnSuccess(@TempDir tempDir: Path) {
         val ran = CountDownLatch(1)
         val gmail = mock<GmailClient> {
-            on { fetchIntakeEmails() } doReturn emptyList()
+            on { fetchIntakeEmails(any()) } doReturn emptyList()
         }
         // Count the latch down as a side effect of the first fetch.
-        whenever(gmail.fetchIntakeEmails()).thenAnswer { ran.countDown(); emptyList<Any>() }
+        whenever(gmail.fetchIntakeEmails(any())).thenAnswer { ran.countDown(); emptyList<Any>() }
         val bridge = mock<PollerBridgeClient>()
         val heartbeat = Heartbeat(tempDir.resolve("hb"))
 
@@ -56,7 +57,7 @@ class IntakeLoopRunForeverTest {
     fun survivesPollFailure(@TempDir tempDir: Path) {
         val ran = CountDownLatch(1)
         val gmail = mock<GmailClient>()
-        whenever(gmail.fetchIntakeEmails()).thenAnswer { ran.countDown(); throw RuntimeException("gmail down") }
+        whenever(gmail.fetchIntakeEmails(any())).thenAnswer { ran.countDown(); throw RuntimeException("gmail down") }
         val bridge = mock<PollerBridgeClient>()
         val heartbeat = Heartbeat(tempDir.resolve("hb"))
 

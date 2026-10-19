@@ -1,12 +1,16 @@
 package com.jdbridge.unit
 
 import com.jdbridge.TrackDto
+import com.jdbridge.TrackEventCreate
+import com.jdbridge.TrackEventDto
 import com.jdbridge.TrackStatusUpdate
 import com.jdbridge.TracksStore
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -126,5 +130,54 @@ class TracksModelsTest {
             TracksStore.ALLOWED_STATUSES,
         )
         assertTrue("bogus" !in TracksStore.ALLOWED_STATUSES)
+    }
+
+    // ── Track events ───────────────────────────────────────────────────────────
+
+    @Test
+    fun `TrackStatusUpdate without a source defaults to frontend (backlog UI body)`() {
+        val req = json.decodeFromString(TrackStatusUpdate.serializer(), """{"status":"applied"}""")
+        assertEquals("frontend", req.source)
+    }
+
+    @Test
+    fun `ALLOWED_EVENT_KINDS is the agreed whitelist`() {
+        assertEquals(
+            setOf("status_changed", "note", "email_received", "email_sent", "reply_drafted",
+                  "archived", "unarchived", "applied", "application_filled", "application_submitted",
+                  "account_created", "interview", "rejected", "offer"),
+            TracksStore.ALLOWED_EVENT_KINDS,
+        )
+    }
+
+    @Test
+    fun `sourceError rejects blank and over-long sources`() {
+        assertNull(TracksStore.sourceError("jobbot"))
+        assertNull(TracksStore.sourceError("x".repeat(TracksStore.MAX_SOURCE_LENGTH)))
+        assertTrue(TracksStore.sourceError("  ")!!.contains("blank"))
+        assertTrue(TracksStore.sourceError("x".repeat(TracksStore.MAX_SOURCE_LENGTH + 1))!!.contains("32"))
+    }
+
+    @Test
+    fun `TrackEventDto serializes snake_case with details verbatim and null summary omitted`() {
+        val dto = TrackEventDto(
+            id = 9, track_id = 3, occurred_at = "2026-10-01T12:00:00Z", kind = "status_changed",
+            source = "frontend", details = buildJsonObject { put("from", "backlog"); put("to", "applied") },
+        )
+        val obj = Json.parseToJsonElement(json.encodeToString(TrackEventDto.serializer(), dto)).jsonObject
+        assertEquals(3, obj["track_id"]!!.jsonPrimitive.content.toInt())
+        assertEquals("2026-10-01T12:00:00Z", obj["occurred_at"]!!.jsonPrimitive.content)
+        assertEquals("applied", obj["details"]!!.jsonObject["to"]!!.jsonPrimitive.content)
+        assertNull(obj["summary"])
+    }
+
+    @Test
+    fun `TrackEventCreate requires kind and source`() {
+        val ok = json.decodeFromString(TrackEventCreate.serializer(), """{"kind":"note","source":"jobbot"}""")
+        assertNull(ok.summary)
+        assertNull(ok.details)
+        assertFailsWith<Exception> {
+            json.decodeFromString(TrackEventCreate.serializer(), """{"kind":"note"}""")
+        }
     }
 }

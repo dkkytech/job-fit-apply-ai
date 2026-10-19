@@ -173,6 +173,19 @@ class ScoreFitNodeProcessTest {
             val result = node.process(baseInput())
             assertTrue(result.skippedReason.contains("Hard gate"))
         }
+
+        @Test
+        @DisplayName("skippedReason lists every hard gate, and the score dir is kept for the notes")
+        fun skippedReasonListsAllGates() {
+            val node = ScoreFitNode(llm = LlmCaller { scoreJson(
+                score = 90,
+                hardGates = listOf("Requires active security clearance", "Pure manual QA")
+            ) })
+            val result = node.process(baseInput())
+            assertEquals("Hard gate: Requires active security clearance; Pure manual QA", result.skippedReason)
+            assertTrue(result.scoreOutputPath.isNotBlank(), "score_fit.txt's dir is kept in state")
+            assertTrue(java.nio.file.Files.exists(java.nio.file.Path.of(result.scoreOutputPath, "score_fit.txt")))
+        }
     }
 
     // ── Error handling ────────────────────────────────────────────────────────
@@ -253,4 +266,18 @@ class ScoreFitNodeProcessTest {
     /** Override outputPath to write score_fit.txt into a temp dir instead of a real output dir. */
     private fun JDState.withOutputDir(tempDir: Path): JDState =
         copy(outputPath = tempDir.resolve("output").also { java.nio.file.Files.createDirectories(it) }.toString())
+
+    @Test
+    @DisplayName("the rubric sum of dimensions replaces the model's fit_score and drives the action")
+    fun rubricSumReplacesModelScore() {
+        // Model claims 85, but its dimensions add up to 45 (no mobile bonus) — under FIT_THRESHOLD.
+        val json = scoreJson(score = 85).replace(
+            "\"dimension_scores\": {\"mobile\": 80, \"cicd\": 90}",
+            "\"dimension_scores\": {\"framework\": 5, \"cicd\": 10, \"web_api\": 10, \"seniority\": 10, " +
+                "\"stack_overlap\": 3, \"location\": 5, \"domain\": 2, \"mobile\": 0}",
+        )
+        val result = ScoreFitNode(llm = LlmCaller { json }).process(baseInput())
+        assertEquals(45f, result.fitScore)
+        assertEquals(PipelineAction.SKIP, result.pipelineAction)
+    }
 }

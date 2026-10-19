@@ -1,0 +1,15 @@
+{
+  "env": {
+    "browser": true,
+    "webextensions": true,
+    "node": true,
+    "jest": true,
+    "es2021": true
+  },
+  "extends": ["eslint:recommended"],
+  "ignorePatterns": ["vendor/**", "coverage/**"],
+  "parserOptions": {
+    "ecmaVersion": 2021,
+    "sourceType": "module"
+  }
+}

@@ -49,7 +49,7 @@ DB volume (the old volume survives on disk, but the stack won't be using it).
 
 | Service | prod host | test host | tailnet exposed |
 |---|---|---|---|
-| postgres | 5432 | 25432 | no |
+| postgres | 5432 | 25432 | no (loopback; `POSTGRES_BIND_ADDR` to override) |
 | bridge | 8765 | 28765 | yes (both) |
 | frontend | 3030 | 23030 | yes (both) |
 | markserv | 8081 | 28081 | yes (both) |

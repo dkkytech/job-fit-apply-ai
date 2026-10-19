@@ -1,0 +1,101 @@
+{
+  "_comment": "Which action buttons a completed-feed event qualifies for. The notifier (Notifier.eligible) and jobbot-mcp (Eligibility) must both pass every case. Fields are the bridge's wire names. Apply needs a tailored job (pipeline_action TAILOR): the fill uploads the tailored resume, and a skipped job has none. Tailor needs an offered job (pipeline_action OFFER: a fit below AUTO_TAILOR_MIN_SCORE, not tailored up front); the tap queues its resume build.",
+  "verbs": ["apply", "reply", "archive", "tailor"],
+  "cases": [
+    {
+      "name": "scraped job with a posting URL and no source email",
+      "event": {"completed_seq": 7, "job_url": "https://acme.co/jobs/1", "pipeline_action": "TAILOR", "message_id": null, "is_recruiter": false, "terminal_label": null},
+      "eligible": ["apply"]
+    },
+    {
+      "name": "digest child: the poller already archived the email",
+      "event": {"completed_seq": 8, "job_url": "https://acme.co/jobs/2", "pipeline_action": "TAILOR", "message_id": "m-digest", "is_recruiter": false, "terminal_label": "JD_Processed_Digest"},
+      "eligible": ["apply"]
+    },
+    {
+      "name": "job-board email processed and archived by the poller",
+      "event": {"completed_seq": 9, "job_url": "https://acme.co/jobs/3", "pipeline_action": "TAILOR", "message_id": "m-board", "is_recruiter": false, "terminal_label": "JD_Processed"},
+      "eligible": ["apply"]
+    },
+    {
+      "name": "recruiter email with a posting URL: everything",
+      "event": {"completed_seq": 10, "job_url": "https://acme.co/jobs/4", "pipeline_action": "TAILOR", "message_id": "m-rec", "is_recruiter": true, "terminal_label": "Recruiter_Response_Required"},
+      "eligible": ["apply", "reply", "archive"]
+    },
+    {
+      "name": "recruiter email without a posting URL: reply and archive only",
+      "event": {"completed_seq": 11, "job_url": null, "pipeline_action": "TAILOR", "message_id": "m-rec2", "is_recruiter": true, "terminal_label": "Recruiter_Response_Required"},
+      "eligible": ["reply", "archive"]
+    },
+    {
+      "name": "recruiter flag but no source email: nothing to reply to or archive",
+      "event": {"completed_seq": 12, "job_url": null, "pipeline_action": "TAILOR", "message_id": null, "is_recruiter": true, "terminal_label": "Recruiter_Response_Required"},
+      "eligible": []
+    },
+    {
+      "name": "blank job_url is no job_url",
+      "event": {"completed_seq": 13, "job_url": "   ", "pipeline_action": "TAILOR", "message_id": null, "is_recruiter": false, "terminal_label": null},
+      "eligible": []
+    },
+    {
+      "name": "source email with no terminal label yet cannot be archived",
+      "event": {"completed_seq": 14, "job_url": null, "pipeline_action": "TAILOR", "message_id": "m-x", "is_recruiter": false, "terminal_label": null},
+      "eligible": []
+    },
+    {
+      "name": "application update stays in the inbox: archive only",
+      "event": {"completed_seq": 15, "job_url": null, "pipeline_action": "TAILOR", "message_id": "m-upd", "is_recruiter": false, "terminal_label": "JD_Application_Update"},
+      "eligible": ["archive"]
+    },
+    {
+      "name": "no completed_seq: no callback can address the job",
+      "event": {"completed_seq": 0, "job_url": "https://acme.co/jobs/5", "pipeline_action": "TAILOR", "message_id": "m-rec3", "is_recruiter": true, "terminal_label": "Recruiter_Response_Required"},
+      "eligible": []
+    },
+    {
+      "name": "pay-gated high fit (SKIP): no Apply, there is no tailored resume to upload",
+      "event": {"completed_seq": 16, "job_url": "https://jobright.ai/jobs/info/6abf", "pipeline_action": "SKIP", "message_id": "m-digest2", "is_recruiter": false, "terminal_label": "JD_Processed_Digest"},
+      "eligible": []
+    },
+    {
+      "name": "skipped recruiter email: reply and archive still work, Apply does not",
+      "event": {"completed_seq": 17, "job_url": "https://acme.co/jobs/6", "pipeline_action": "SKIP", "message_id": "m-rec4", "is_recruiter": true, "terminal_label": "Recruiter_Response_Required"},
+      "eligible": ["reply", "archive"]
+    },
+    {
+      "name": "no pipeline_action: no Apply",
+      "event": {"completed_seq": 18, "job_url": "https://acme.co/jobs/7", "pipeline_action": null, "message_id": null, "is_recruiter": false, "terminal_label": null},
+      "eligible": []
+    },
+    {
+      "name": "the action's case does not matter",
+      "event": {"completed_seq": 19, "job_url": "https://acme.co/jobs/8", "pipeline_action": "tailor", "message_id": null, "is_recruiter": false, "terminal_label": null},
+      "eligible": ["apply"]
+    },
+    {
+      "name": "offered job (below the auto-tailor score): Tailor only, there is no resume to apply with yet",
+      "event": {"completed_seq": 30, "job_url": "https://acme.co/jobs/30", "pipeline_action": "OFFER", "message_id": null, "is_recruiter": false, "terminal_label": null},
+      "eligible": ["tailor"]
+    },
+    {
+      "name": "offered digest child: the poller already archived the email, so Tailor only",
+      "event": {"completed_seq": 31, "job_url": "https://acme.co/jobs/31", "pipeline_action": "OFFER", "message_id": "m-digest3", "is_recruiter": false, "terminal_label": "JD_Processed_Digest"},
+      "eligible": ["tailor"]
+    },
+    {
+      "name": "offered without a posting URL can still be tailored",
+      "event": {"completed_seq": 32, "job_url": null, "pipeline_action": "offer", "message_id": null, "is_recruiter": false, "terminal_label": null},
+      "eligible": ["tailor"]
+    },
+    {
+      "name": "deferred (cloud quota out): no buttons, it is tailored automatically when the quota is back",
+      "event": {"completed_seq": 34, "job_url": "https://acme.co/jobs/34", "pipeline_action": "DEFERRED", "message_id": null, "is_recruiter": false, "terminal_label": null},
+      "eligible": []
+    },
+    {
+      "name": "offered but no completed_seq: no callback can address the job",
+      "event": {"completed_seq": 0, "job_url": "https://acme.co/jobs/33", "pipeline_action": "OFFER", "message_id": null, "is_recruiter": false, "terminal_label": null},
+      "eligible": []
+    }
+  ]
+}

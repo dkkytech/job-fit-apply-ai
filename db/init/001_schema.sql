@@ -83,3 +83,22 @@ CREATE TABLE IF NOT EXISTS resume_tailoring (
 
 CREATE INDEX IF NOT EXISTS idx_resume_tailoring_track_id   ON resume_tailoring (track_id);
 CREATE INDEX IF NOT EXISTS idx_resume_tailoring_created_at ON resume_tailoring (created_at DESC);
+
+-- ── track_events ───────────────────────────────────────────────────────────────
+-- Application history per track: status changes, notes, emails, applications …
+-- appended by the frontend (via the bridge), the bridge itself, and JobBot.
+-- Production never re-runs this directory, so the bridge also creates this table
+-- at startup (TracksStore.ensureSchema) — keep the two definitions in sync.
+CREATE TABLE IF NOT EXISTS track_events (
+    id           BIGSERIAL   PRIMARY KEY,
+    track_id     INTEGER     NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    kind         TEXT        NOT NULL,   -- whitelisted by the bridge (TracksStore.ALLOWED_EVENT_KINDS)
+    summary      TEXT,
+    source       TEXT        NOT NULL,   -- who recorded it: frontend | bridge | jobbot | …
+    details      JSONB
+);
+
+-- GET /api/tracks/{id}/events reads one track's history, newest first
+CREATE INDEX IF NOT EXISTS idx_track_events_track_occurred
+    ON track_events (track_id, occurred_at);

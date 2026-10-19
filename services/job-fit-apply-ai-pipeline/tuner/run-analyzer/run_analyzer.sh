@@ -10,7 +10,7 @@
 #
 # Usage:
 #   run_analyzer.sh              analysis + trend + notify (cheap; hourly on the schedule)
-#   run_analyzer.sh --autofix    gated auto-fix -> living draft PR -> notify (daily; opt-in)
+#   run_analyzer.sh --autofix    gated auto-fix -> living draft PR -> notify (twice daily; opt-in)
 #
 # Config (env):
 #   RUN_ANALYZER_MODEL     analysis model (oMLX local default Qwen3.5-9B-OptiQ-4bit)
@@ -19,11 +19,10 @@
 #   RUN_ANALYZER_TELEGRAM_BOT_TOKEN / _CHAT_ID
 #                         analyzer Telegram destination (falls back to TELEGRAM_*)
 #   PROJECT_DIR            pipeline checkout (auto-detected from this script's location)
-#   Cadence gate (analysis only defers small batches; see analyze.py):
-#     RUN_ANALYZER_MIN_BATCH       analyze once >= N new jobs accrue    (default 10)
-#     RUN_ANALYZER_MAX_DEFER_HOURS force a run after T hours waiting    (default 6)
+#   Analysis context:
 #     RUN_ANALYZER_CONTEXT_N       rolling context-window size          (default 40)
 #     RUN_ANALYZER_RESOLVE_RUNS    runs each side of a merge to judge outcome (default 3)
+#     RUN_ANALYZER_RESOLVE_MIN_JOBS jobs each side of a merge to judge outcome (default 30)
 #
 set -uo pipefail
 
@@ -63,7 +62,6 @@ export RUN_TS
 export RUN_LOG="$(jfaa_pipeline_output)/runs/run_log.jsonl"
 export FINDINGS_DIR="$ANALYZER_DIR/findings/$RUN_TS"
 export CURSOR_FILE="$STATE_DIR/cursor"
-export PENDING_FILE="$STATE_DIR/pending_since"
 export METRICS_FILE="$STATE_DIR/last_metrics.json"
 export HISTORY_FILE="$STATE_DIR/metrics_history.jsonl"
 export FINDINGS_LEDGER_FILE="$STATE_DIR/findings_ledger.jsonl"

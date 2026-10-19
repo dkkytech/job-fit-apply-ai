@@ -95,6 +95,39 @@ class JobStatusApiTest {
     }
 
     @Test
+    fun `track_id, title and company from the result reach job status and the completed feed`() = testApplication {
+        application { configureApplication() }
+        val jobId = runBlocking { enqueue(defaultJdJson(), null, null).also { claimNext() } }
+
+        val post = client.post("/api/jobs/$jobId/result") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"pipeline_action":"TAILOR","fit_score":81,"company":"Acme Corp",
+                       "role_title":"Staff SDET","track_id":42}""")
+        }
+        assertEquals(HttpStatusCode.OK, post.status)
+
+        val status = Json.parseToJsonElement(client.get("/api/jobs/$jobId").bodyAsText()).jsonObject
+        assertEquals(42, status["track_id"]!!.jsonPrimitive.int)
+        assertEquals("Staff SDET", status["title"]!!.jsonPrimitive.content)
+        assertEquals("Acme Corp", status["company"]!!.jsonPrimitive.content)
+
+        val feed = Json.parseToJsonElement(client.get("/api/jobs/completed?all=true").bodyAsText()).jsonArray
+        val event = feed.map { it.jsonObject }.single { it["job_id"]!!.jsonPrimitive.content == jobId }
+        assertEquals(42, event["track_id"]!!.jsonPrimitive.int)
+    }
+
+    @Test
+    fun `track_id, title and company are absent before a result lands`() = testApplication {
+        application { configureApplication() }
+        val jobId = runBlocking { enqueue(defaultJdJson(), null, null) }
+
+        val body = Json.parseToJsonElement(client.get("/api/jobs/$jobId").bodyAsText()).jsonObject
+        assertFalse(body.containsKey("track_id"))
+        assertFalse(body.containsKey("title"))
+        assertFalse(body.containsKey("company"))
+    }
+
+    @Test
     fun `GET job with fit_score 0 returns 0 not null`() = testApplication {
         application { configureApplication() }
         val jobId = runBlocking { enqueueAndComplete(fitScore = 0, pipelineAction = "SKIP", includeCoverLetter = false) }

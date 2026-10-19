@@ -28,6 +28,11 @@ CATEGORY_METRIC = {
 }
 IMPROVE_FACTOR = 0.5   # metric must at least halve (or hit 0) to count as resolved
 NO_CHANGE_FACTOR = 0.9  # >= 90% of the before-median after K runs -> the fix didn't help
+# A verdict also needs enough *jobs* behind it, not just enough runs. Runs are a poor proxy
+# now that any non-empty cursor delta is analyzed: three consecutive one-job windows would
+# otherwise auto-retire a finding on three jobs of evidence. 30 preserves the job mass the
+# old accumulate-until-N cadence gate guaranteed (K runs x MIN_BATCH 10).
+MIN_RESOLVE_JOBS = 30
 
 
 def _latest_by_fp(ledger_path: Path):
@@ -72,14 +77,6 @@ def _iso_epoch(iso):
         return None
 
 
-def _median(vals):
-    vals = sorted(v for v in vals if isinstance(v, (int, float)))
-    if not vals:
-        return None
-    n = len(vals)
-    return vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
-
-
 def reconcile_merges(ledger_path: Path, gh_bin="gh"):
     """Flip pr_open autofix entries whose PR has merged to pr_merged (+ merged_ts). Best-effort."""
     import shutil
@@ -102,11 +99,31 @@ def reconcile_merges(ledger_path: Path, gh_bin="gh"):
                                   "merged_ts": info.get("mergedAt")})
 
 
-def check_outcomes(findings_ledger_load, autofix_ledger_path, history_path, k=3):
+def _mass_window(rows, k, min_jobs, from_end=False):
+    """Smallest run-window holding >= k runs AND >= min_jobs jobs, or None if unreachable.
+
+    `rows` is [(value, jobs), ...] in chronological order. Grows from the start (the runs just
+    after a merge) or, with from_end, from the end (the runs just before it).
+    """
+    picked, jobs = [], 0
+    for val, n in (reversed(rows) if from_end else rows):
+        picked.append((val, n))
+        jobs += n
+        if len(picked) >= k and jobs >= min_jobs:
+            return picked
+    return None
+
+
+def check_outcomes(findings_ledger_load, autofix_ledger_path, history_path, k=3,
+                   min_jobs=MIN_RESOLVE_JOBS):
     """Return {"resolved": [fp...], "regressed": [fp...]} for merged fixes with enough post-merge data.
 
     `findings_ledger_load` is a {fingerprint: entry} dict (from findings_ledger.load) used for the
     finding's category and current status.
+
+    A verdict requires >= k runs and >= min_jobs jobs on BOTH sides of the merge; anything
+    thinner defers rather than guessing. Medians are job-weighted so a one-job window (whose
+    rate is quantized to 0.0 or 1.0) cannot by itself flip a finding to resolved.
     """
     resolved, regressed = [], []
     autofix = _latest_by_fp(autofix_ledger_path)
@@ -131,11 +148,14 @@ def check_outcomes(findings_ledger_load, autofix_ledger_path, history_path, k=3)
             val = (h.get("metrics") or {}).get(metric)
             if ep is None or val is None:
                 continue
-            (before if ep < merged_ep else after).append(val)
-        if len(after) < k:
-            continue  # not enough post-merge runs yet — decide later
-        bmed = _median(before[-k:])
-        amed = _median(after[:k])
+            (before if ep < merged_ep else after).append((val, history._jobs(h)))
+        # Both sides need enough runs and enough job mass; otherwise decide on a later run.
+        after_w = _mass_window(after, k, min_jobs)
+        before_w = _mass_window(before, k, min_jobs, from_end=True)
+        if after_w is None or before_w is None:
+            continue
+        bmed = history.weighted_median(before_w)
+        amed = history.weighted_median(after_w)
         if bmed is None or amed is None:
             continue
         if amed <= bmed * IMPROVE_FACTOR or amed == 0:

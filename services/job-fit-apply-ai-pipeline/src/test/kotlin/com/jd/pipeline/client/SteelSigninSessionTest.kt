@@ -296,6 +296,8 @@ class SteelSigninSessionTest {
         assertEquals("https://www.linkedin.com/login", SteelSigninSession.loginUrlFor("LinkedIn"))
         assertEquals("https://www.linkedin.com/login", SteelSigninSession.loginUrlFor("www.linkedin.com"))
         assertEquals("https://jobright.ai/?login=true", SteelSigninSession.loginUrlFor("jobright"))
+        // Monster's wall is DataDome's bot check, shown on its home page.
+        assertEquals("https://www.monster.com/", SteelSigninSession.loginUrlFor("Monster"))
         // An unknown host falls back to its root, which redirects to that site's own sign-in.
         assertEquals("https://boards.greenhouse.io/", SteelSigninSession.loginUrlFor("boards.greenhouse.io"))
         assertNull(SteelSigninSession.loginUrlFor("nonsense"))

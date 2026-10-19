@@ -145,6 +145,55 @@ What it does:
 
 The personal files (`resume.yaml`, `candidate_profile.yaml`, `generated_resume.html`) are **gitignored** — your personal data never gets committed.
 
+### Keeping personal data out of the repo entirely
+
+Both personal files can live outside this checkout — e.g. a private profile repo — and be
+pointed at with two independent overrides:
+
+| Variable | Points at | Unset → falls back to |
+|---|---|---|
+| `RESUME_YAML_PATH` | your canonical résumé YAML | `src/main/resources/resume/resume.yaml` |
+| `CANDIDATE_PROFILE_YAML_PATH` | your slim pipeline config | `config/candidate_profile.yaml` |
+
+```sh
+export RESUME_YAML_PATH="$HOME/projects/profile/base-resume.yaml"
+export CANDIDATE_PROFILE_YAML_PATH="$HOME/projects/profile/candidate_profile.yaml"
+```
+
+The schemas are unchanged — only where the pipeline looks for them. Each override answers
+exactly one question, so the two can never disagree about precedence. Setting neither
+preserves the in-tree behaviour exactly.
+
+**Running the processor in Docker:** the container does **not** mount your home directory, so
+these must be paths *inside* the container. Mount the profile directory and point the
+overrides at the mount target:
+
+```yaml
+# docker-compose.yml, under the `processor` service
+volumes:
+  - "${JFAA_PROFILE_DIR:-${HOME}/projects/profile}:/profile:ro"
+environment:
+  RESUME_YAML_PATH: /profile/base-resume.yaml
+  CANDIDATE_PROFILE_YAML_PATH: /profile/candidate_profile.yaml
+```
+
+Note that this is a **single directory bind-mount** for the container, distinct from the two
+path overrides: the mount decides what the container can *see*, and the two variables decide
+which files the pipeline *reads*. `${JFAA_PROFILE_DIR}` exists only as a Compose convenience
+default for the mount source on the host — it is not read by the pipeline, and the pipeline
+never consults it. A host checkout at `~/projects/profile` with no mount will not work when
+the processor runs in Docker.
+
+When running the pipeline directly on the host (`./gradlew run`), the overrides above work
+as written, with no mount needed.
+
+**Note on `--resume-gen` with an override:** that command writes its output *next to its
+input*, so pointing `RESUME_YAML_PATH` at an out-of-tree file writes a derived
+`<name>-generated.html` into that same directory. The pipeline itself is unaffected — the
+per-job render still goes to the job's output directory — but the artifact lands in whatever
+directory holds your résumé. Add a `*-generated.html` ignore there if you don't want it
+committed.
+
 > **Backups:** any pre-existing copy of a generated file is moved aside with a timestamped `.bak` suffix before being overwritten.
 
 ## Environment + LLM setup
@@ -155,7 +204,8 @@ Copy `.env.example` to `.env` and fill in at least one LLM backend.
 
 | Backend | How to enable | Notes |
 |---|---|---|
-| **Ollama (local)** | Run `ollama serve`; leave `OLLAMA_LOCAL_BASE_URL=http://localhost:11434` | Free, runs on your machine |
+| **oMLX (local, the default)** | Serve MLX models with oMLX on `MLX_LOCAL_BASE_URL` (default `http://127.0.0.1:11436/v1`, key `MLX_API_KEY`); a model name with no suffix routes here | Free, runs on your machine (Apple Silicon). The name must match the oMLX model id |
+| **Ollama (local)** | Run `ollama serve`; append `:ollama-local` to the model name (`OLLAMA_LOCAL_BASE_URL`, default `http://localhost:11434`) | Free, runs on your machine |
 | **Ollama Cloud** | Set `OLLAMA_API_KEY` and append `:ollama-cloud` to any model name | Pay per token |
 | **MiniMax** | Set `MINIMAX_API_KEY`, use `:cloud` suffix (e.g. `SCORE_MODEL=MiniMax-M2.7:cloud`) | Strong long-context performance |
 | **DeepSeek** | Set `DEEPSEEK_API_KEY`, use `:cloud` suffix (e.g. `SCORE_MODEL=deepseek-reasoner:cloud`) | `deepseek-reasoner` for chain-of-thought scoring |
@@ -176,25 +226,60 @@ JSearch (API-driven runs instead of Gmail): set `JSEARCH_API_KEY` and run with `
 
 ### Models
 
-All node-level model variables default to `qwen3.5:9b-q4_K_M`. Override per node in `.env`:
+Each node has its own model variable. Set it in `.env`; a node you leave unset uses the default below.
 
-| Variable | Used by |
-|---|---|
-| `SCAN_MODEL` | `ScanEmailNode` — email classification and field extraction |
-| `SCRAPE_MODEL` (defaults to `SCAN_MODEL`) | `ScrapeJdNode` — job-page structured extraction |
-| `SCORE_MODEL` | `ScoreFitNode` — combined fit scoring + JD structure extraction |
-| `RESUME_REASONING_MODEL` | `SummaryRewriteNode`, `BulletRewriteNode` — creative rewriting |
-| `SKILLS_MODEL` (defaults to `RESUME_REASONING_MODEL`) | `SkillsRestructureNode` (JdExtraction/GapAnalysis/AtsValidation use `SCORE_MODEL`; `BulletReorderNode` is deterministic — no LLM) |
-| `COVER_LETTER_MODEL` | `GenerateCoverLetterNode` |
-| `DRAFT_REPLY_MODEL` | `CreateDraftReply` |
+| Variable | Default | Used by |
+|---|---|---|
+| `SCAN_MODEL` | `Qwen3.5-9B-OptiQ-4bit` | `ScanEmailNode` — email classification and field extraction |
+| `SCRAPE_MODEL` | same as `SCAN_MODEL` | `ScrapeJdNode` — job-page structured extraction |
+| `SCORE_MODEL` | `Qwen3.5-9B-OptiQ-4bit` | `ScoreFitNode` — combined fit scoring + JD structure extraction; also JdExtraction, GapAnalysis and AtsValidation |
+| `RESUME_REASONING_MODEL` | `Qwen3.5-9B-OptiQ-4bit` | `SummaryRewriteNode`, `BulletRewriteNode` — creative rewriting |
+| `SKILLS_MODEL` | same as `RESUME_REASONING_MODEL` | `SkillsRestructureNode` (`BulletReorderNode` is deterministic — no LLM) |
+| `COVER_LETTER_MODEL` | `gemma-4-12B-it-qat-4bit` | `GenerateCoverLetterNode` |
+| `DRAFT_REPLY_MODEL` | `Qwen3.5-9B-OptiQ-4bit` | `CreateDraftReply` |
+
+**The defaults are for a fresh clone, not for quality.** They are small local models (8–10 GB each on disk) served by oMLX, so the pipeline runs end to end on a modest Mac without cloud keys. They are deliberately not the best models: a larger machine, or cloud models, will score and tailor better. Override any node in `.env`.
+
+**Picking better models.** Use `tuner/env-llm-tuner/` to choose per-node models for your hardware and providers. For reference, a screen on 2026-10-13 re-scored 30 jobs that a cloud model (`glm-5.2`) had already scored, on a 64 GB M1 Max:
+
+| Local model | Same skip/tailor decision as the cloud model (at 55) | Time per score (median / p95) | Notes |
+|---|---|---|---|
+| `Qwen3.6-35B-A3B-OptiQ-4bit` (22 GB) | 26/30 | 25s / 40s | No failures; same score on a repeat run; never skipped a job the cloud model wanted |
+| `Qwen3.5-9B-OptiQ-4bit` (the default) | 23/27 | 50s / 195s | 4 of 40 calls hit the 195s timeout |
+| `mlx-community--Qwen3-30B-A3B-4bit` | 19/30 | 40s / 76s | Scored about 15 points high |
+
+If you have the memory for it, `Qwen3.6-35B-A3B-OptiQ-4bit` is the better local choice for `SCAN_MODEL`, `SCRAPE_MODEL` and `SCORE_MODEL`. Tailoring models were not part of that screen.
+
+**Defaults vs. the local fallback.** These defaults are what a node uses when `.env` doesn't name a model. `LOCAL_FALLBACK_MODEL` (below) is a separate, opt-in setting: a local model the intake lane switches to only while a cloud model's quota is used up. A setup that runs entirely on local models doesn't need it.
 
 > Résumé HTML is now rendered deterministically from `resume.yaml` (no LLM), so the former `RESUME_GEN_MODEL` / `PROFILE_GEN_MODEL` are gone.
+
+### Cloud quota → local fallback (intake lane)
+
+When a cloud provider refuses a call because the account's usage quota is used up, the intake lane keeps running on a local model instead of failing every job until the quota resets. A quota refusal is HTTP 402, or a 403/429 whose body uses quota wording ("weekly usage limit", "credits", "upgrade", …). Ordinary throttling ("rate limit", "too many requests", "concurrent requests", per-minute limits) is still retried as before.
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOCAL_FALLBACK_MODEL` | *(blank — off)* | Local model (oMLX or local Ollama) that `ScanEmailNode`, the LLM digest strategy, `ScrapeJdNode` and `ScoreFitNode` use while the cloud quota is exhausted. Must be a local model; a cloud name is ignored. Not a default: it is used only during a quota outage. `Qwen3.6-35B-A3B-OptiQ-4bit` is the tested choice on a machine with room for it (see Models). |
+| `LOCAL_FALLBACK_TIMEOUT_SECONDS` | `300` | Per-call timeout for the fallback (local models are slower, and the first call loads the model). |
+| `CLOUD_QUOTA_RECHECK_MINUTES` | `30` | After a quota refusal, skip the cloud for this long; the next call then probes it again. |
+
+The first refusal sends one WARN alert, and the first cloud success after it sends one INFO alert. Tailoring nodes are never redirected to the local model; they need the stronger cloud models.
+
+**Deferred tailoring.** While the quota counts as used up (from a refusal until the next cloud success), a job that would be tailored is `DEFERRED` instead of shipping the base resume every failed node falls back to. The job is scored by the fallback model, gets scoring notes, is tracked as `deferred` and pinged ("Tailoring deferred"). A recruiter email stays in the inbox. If the quota runs out part-way through tailoring, the degraded output is dropped and the job deferred. Between jobs, the processor's release sweep asks the bridge (`POST /api/tailoring/release-deferred`) to queue deferred jobs as `TAILOR_REQUEST`s once the quota is back, best fits first, keeping a few in flight so new intake is never starved. Jobs older than the max age expire with one "tailor by hand" alert.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEFERRED_RELEASE_BATCH` | `2` | `TAILOR_REQUEST`s the sweep keeps in flight once the quota is back. |
+| `DEFERRED_RELEASE_INTERVAL_MINUTES` | `15` | How often the sweep runs (between jobs). |
+| `DEFERRED_MAX_AGE_DAYS` | `5` | A deferred job not tailored within this many days expires with a "tailor by hand" alert. |
 
 ### Backend routing (`:cloud` and `:ollama-cloud` suffixes)
 
 | Suffix | Routes to |
 |---|---|
-| (none) | Local Ollama at `OLLAMA_LOCAL_BASE_URL` |
+| (none) | Local oMLX at `MLX_LOCAL_BASE_URL` (key `MLX_API_KEY`) — where the defaults run |
+| `:ollama-local` | Local Ollama at `OLLAMA_LOCAL_BASE_URL` |
 | `:ollama-cloud` | Ollama Cloud (requires `OLLAMA_API_KEY`) |
 | `:cloud` with `MiniMax-…` prefix | MiniMax API (requires `MINIMAX_API_KEY`) |
 | `:cloud` with `deepseek-…` prefix | DeepSeek API (requires `DEEPSEEK_API_KEY`) |
@@ -204,6 +289,7 @@ All node-level model variables default to `qwen3.5:9b-q4_K_M`. Override per node
 | Variable | Default | Description |
 |---|---|---|
 | `FIT_THRESHOLD` | `50` | Minimum fit score to trigger tailoring |
+| `AUTO_TAILOR_MIN_SCORE` | *(= `FIT_THRESHOLD`)* | Fits at or above this are tailored automatically. Non-recruiter fits from `FIT_THRESHOLD` up to it are **offered**: scored, tracked (`pipeline_action = offer`) and pinged, but tailored only when you tap Tailor (`POST /api/jobs/{id}/tailor` on the bridge queues a `TAILOR_REQUEST`, which re-scores, tailors and updates the same `tracks` row). Recruiter emails are always tailored. Set in the repo-root `.env`. |
 | `DUPLICATE_WINDOW_DAYS` | `30` | Jobs seen within this window are skipped as duplicates |
 | `ATS_REFINE_ENABLED` | `true` | Re-run summary+bullet rewrites once with ATS feedback when the first pass scores below the refine threshold (keeps the better-scoring pass) |
 | `ATS_REFINE_THRESHOLD` | `80` | ATS overall score below which the refinement pass triggers |
@@ -328,6 +414,14 @@ schema.org JSON-LD). The CDP browser is used for **LinkedIn** (always), for page
 finds **blocked or thin** (Cloudflare / 403 / JS-rendered SPA), and for any domain listed in
 **`CDP_FORCE_DOMAINS`** — a proactive list for sites that soft-block plain HTTP (e.g. Glassdoor)
 where waiting to detect a block isn't reliable.
+
+**Where report fields come from:** remote policy, salary, employment type, seniority, YOE and
+tech stack are read first from data the page embeds for that posting — Jobright's `__NEXT_DATA__`
+job object, then schema.org `JobPosting` JSON-LD (Dice, Built In, Indeed, ZipRecruiter, most ATS).
+Those values win over the LLM's reading of the page; the LLM fills whatever they leave blank, and
+its `"unknown"` never overwrites a known value. JSearch jobs take the same fields from the API.
+Every field must also be listed on the bridge's `SubmitJobRequest`: the bridge re-encodes queued
+jobs from that class, so a field missing there is silently dropped and the report shows "—".
 
 All browser scraping goes through this host CDP Chrome — there is no in-process launch
 fallback. If the debug Chrome is unreachable, browser-needing scrapes **fail cleanly** with a

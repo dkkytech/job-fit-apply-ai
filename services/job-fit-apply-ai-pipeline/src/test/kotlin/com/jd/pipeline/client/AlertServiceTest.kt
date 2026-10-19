@@ -146,4 +146,18 @@ class AlertServiceTest {
         alerts.reauthRequired("LinkedIn")
         alerts.pipelineTimeout(5)
     }
+
+    @Test
+    @DisplayName("a deduped alert repeats once the repeat window has passed, not only once per process")
+    fun dedupRepeatsAfterWindow() {
+        val client = mock<NotificationClient>()
+        var now = 0L
+        val alerts = AlertService(client, repeatAfterMs = 60_000, nanoTime = { now })
+        alerts.send(Alert(Severity.WARN, "Sign-in required: LinkedIn", "y"), dedupKey = "reauth:LinkedIn")
+        now += 59_000L * 1_000_000   // inside the window → suppressed
+        alerts.send(Alert(Severity.WARN, "Sign-in required: LinkedIn", "y"), dedupKey = "reauth:LinkedIn")
+        now += 2_000L * 1_000_000    // past it → sent again
+        alerts.send(Alert(Severity.WARN, "Sign-in required: LinkedIn", "y"), dedupKey = "reauth:LinkedIn")
+        verify(client, org.mockito.kotlin.times(2)).postTelegramHtml(org.mockito.kotlin.any())
+    }
 }

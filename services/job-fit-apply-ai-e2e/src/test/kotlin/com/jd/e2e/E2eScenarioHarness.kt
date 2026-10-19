@@ -44,6 +44,12 @@ data class ScenarioResult(
     val discordMessages: List<String>,
     val telegramMessages: List<String>,
     val llmCalls: List<String>,
+    /** The model each [llmCalls] entry asked for, index-aligned. Empty under REAL_LLM=1. */
+    val llmModels: List<String> = emptyList(),
+    /** Inline-keyboard rows on delivered Telegram pings, in order. Empty when no buttons. */
+    val telegramButtonRows: List<List<String>> = emptyList(),
+    /** (label, url-or-callback) for every delivered button, so its kind is assertable. */
+    val telegramButtons: List<Pair<String, String>> = emptyList(),
 ) {
     val completedEvent: JsonNode get() = completedEvents.singleOrNull()
         ?: error("expected exactly one completed event for $jobId, got ${completedEvents.size}: $completedEvents")
@@ -54,7 +60,7 @@ data class ScenarioResult(
 }
 
 /**
- * Mirrors NOTIFICATION_FIT_THRESHOLD, which docker-compose.e2e.yml pins to 50 for the slice
+ * Mirrors FIT_THRESHOLD, which docker-compose.e2e.yml pins to 50 for the slice
  * precisely so this side can be a constant. Change one, change the other — a mismatch shows up
  * as a 30s timeout waiting for a Telegram that was never going to be sent.
  */
@@ -123,6 +129,16 @@ class E2eScenarioHarness {
             text.replace("{{${entry.key}}}", entry.value)
         }
 
+    /** Wait until the async notifier has recorded Discord delivery for [company]. */
+    fun awaitDiscordDelivery(company: String): List<String> =
+        pollUntil(
+            90,
+            1000,
+            { "notifier to deliver Discord for '$company' (sink saw: ${sink.describe()})" },
+        ) {
+            sink.discordTexts().filter { it.contains(company) }.takeIf { it.isNotEmpty() }
+        }
+
     fun runScenario(
         company: String,
         responses: Map<String, List<FakeLlmServer.PlannedResponse>> = emptyMap(),
@@ -185,13 +201,7 @@ class E2eScenarioHarness {
         }
         println("[e2e] job $jobId in completed feed (${firstSighting.size} event(s) at first sighting)")
 
-        val firstDiscord = pollUntil(
-            90,
-            1000,
-            { "notifier to deliver Discord for '$company' (sink saw: ${sink.describe()})" },
-        ) {
-            sink.discordTexts().filter { it.contains(company) }.takeIf { it.isNotEmpty() }
-        }
+        val firstDiscord = awaitDiscordDelivery(company)
         println("[e2e] notifier delivered Discord for '$company' (${firstDiscord.size} message(s) at first sighting)")
 
         // Everything below is evidence for "exactly one" / "none at all" assertions, which are
@@ -246,7 +256,10 @@ class E2eScenarioHarness {
             apiTrack = apiTrack,
             discordMessages = discordMessages,
             telegramMessages = telegramMessages,
+            telegramButtonRows = sink.telegramButtonRows(),
+            telegramButtons = sink.telegramButtons(),
             llmCalls = if (E2eConfig.realLlm) emptyList() else fakeLlm.calls.toList(),
+            llmModels = if (E2eConfig.realLlm) emptyList() else fakeLlm.callModels.toList(),
         )
     }
 
@@ -256,6 +269,7 @@ class E2eScenarioHarness {
         jdText: String,
         idempotencyKey: String,
         location: String = "Remote (US)",
+        source: String = "MANUAL",
     ): JsonNode = postJson(
         "${E2eConfig.bridgeUrl}/api/jobs",
         mapper.writeValueAsString(
@@ -264,9 +278,18 @@ class E2eScenarioHarness {
                 "company" to company,
                 "role_title" to roleTitle,
                 "location" to location,
-                "source" to "MANUAL",
+                "source" to source,
                 "idempotency_key" to idempotencyKey,
             ),
+        ),
+    )
+
+    /** POST /api/urls — a posting known only by its link (the processor scrapes it). */
+    fun submitUrl(url: String, idempotencyKey: String, source: String = "EMAIL", company: String? = null, roleTitle: String? = null): JsonNode = postJson(
+        "${E2eConfig.bridgeUrl}/api/urls",
+        mapper.writeValueAsString(
+            mapOf("url" to url, "source" to source, "company" to company, "role_title" to roleTitle, "idempotency_key" to idempotencyKey)
+                .filterValues { it != null },
         ),
     )
 
@@ -283,6 +306,7 @@ class E2eScenarioHarness {
         body: String,
         from: String,
         idempotencyKey: String,
+        isRecruiterHint: Boolean = true,
     ): JsonNode = postJson(
         "${E2eConfig.bridgeUrl}/api/emails",
         mapper.writeValueAsString(
@@ -292,7 +316,7 @@ class E2eScenarioHarness {
                 "body" to body,
                 "html_body" to null,
                 "from" to from,
-                "is_recruiter_hint" to true,
+                "is_recruiter_hint" to isRecruiterHint,
                 "idempotency_key" to idempotencyKey,
             ),
         ),
@@ -400,7 +424,8 @@ class E2eScenarioHarness {
         return http.send(builder.build(), handler)
     }
 
-    private fun <T> pollUntil(
+    /** Poll [probe] until it returns non-null, failing after [deadlineSeconds]. */
+    internal fun <T> pollUntil(
         deadlineSeconds: Long,
         intervalMs: Long,
         what: String,

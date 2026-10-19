@@ -7,6 +7,7 @@ import com.jd.pipeline.source.IntakeContext
 import com.jd.pipeline.state.JDState
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
+import org.mockito.kotlin.times
 import org.mockito.kotlin.any
 import org.mockito.kotlin.doAnswer
 import org.mockito.kotlin.mock
@@ -191,6 +192,67 @@ class IngestionPipelineTest {
         assertEquals("scraped content", result.jdText)
     }
 
+    /** A pipeline whose scan yields a job posting with [emailJd] and whose scrape fails with [scrapeError]. */
+    private fun failingScrapePipeline(emailJd: String, scrapeError: String): IngestionPipeline {
+        val pipeline = IngestionPipeline()
+        injectScanNode(pipeline, Node { state ->
+            state.copy(isJobPosting = true, jdText = emailJd, jobUrl = "https://www2.joboppforyou.com/respond.jsp?d=1")
+        })
+        val mockScrape = mock<ScrapeJdNode>()
+        whenever(mockScrape.process(any())).doAnswer { inv ->
+            (inv.arguments[0] as JDState).copy(error = scrapeError, scrapePath = "cdp_fallback")
+        }
+        pipeline.scrapeNode = mockScrape
+        injectSaveNode(pipeline, Node { state -> state })
+        return pipeline
+    }
+
+    @Test
+    @DisplayName("a failed scrape falls back to a full JD already in the recruiter email")
+    fun failedScrapeFallsBackToEmailJd() {
+        // .Net RUST Developer (2026-10-06): an 834-char JD in the email, a mail-merge link the
+        // scan took for the job URL, and Steel down — the whole email went to JD_Error.
+        val emailJd = "Role: .Net RUST Developer. ".repeat(30)
+        val pipeline = failingScrapePipeline(emailJd, "scrape_jd: Error { message='Target page, context or browser has been closed")
+
+        val result = pipeline.invoke(JDState(isJobPosting = false))
+
+        assertEquals("", result.error)
+        assertEquals(emailJd, result.jdText)
+        assertEquals("cdp_fallback", result.scrapePath, "the analyzer still sees the browser was involved")
+        assertEquals(EmailDisposition.Process, EmailResolution.classify(result))
+    }
+
+    @Test
+    @DisplayName("the fallback drops a job_url that is not a URL, so the email is not MALFORMED_URL")
+    fun fallbackDropsNonHttpJobUrl() {
+        val pipeline = IngestionPipeline()
+        injectScanNode(pipeline, Node { state ->
+            state.copy(isJobPosting = true, jdText = "Senior SDET. ".repeat(60), jobUrl = "see link below")
+        })
+        val mockScrape = mock<ScrapeJdNode>()
+        whenever(mockScrape.process(any())).doAnswer { inv ->
+            (inv.arguments[0] as JDState).copy(error = "scrape_jd: Illegal character in path")
+        }
+        pipeline.scrapeNode = mockScrape
+        injectSaveNode(pipeline, Node { state -> state })
+
+        val result = pipeline.invoke(JDState(isJobPosting = false))
+
+        assertEquals("", result.jobUrl)
+        assertEquals(EmailDisposition.Process, EmailResolution.classify(result))
+    }
+
+    @Test
+    @DisplayName("a failed scrape keeps its error when the email holds only a blurb")
+    fun failedScrapeWithThinEmailJdStillErrors() {
+        val pipeline = failingScrapePipeline("SDET role, see link", "scrape_jd: Steel browser not available")
+
+        val result = pipeline.invoke(JDState(isJobPosting = false))
+
+        assertEquals("scrape_jd: Steel browser not available", result.error)
+    }
+
     @Test
     @DisplayName("invoke processes only isJobPosting children of a digest email")
     fun invokeDigestProcessesJobPostingChildrenOnly() {
@@ -226,5 +288,29 @@ class IngestionPipelineTest {
 
         assertEquals(1, result.digestJobs.size, "only the isJobPosting child should be processed")
         assertTrue(result.digestJobs.first().isJobPosting)
+    }
+
+    @Test
+    @DisplayName("a link-only digest child (employer alert) is not scraped in the email's own claim")
+    fun linkOnlyChildrenAreNotScraped() {
+        val pipeline = IngestionPipeline()
+        val linkOnly = JDState(isJobPosting = true, jobUrl = "https://jobs.lever.co/acme/x", submitAsUrl = true, postingKey = "watchlist:lever:acme:x")
+        val scraped = JDState(isJobPosting = true, jobUrl = "https://board.example.com/jobs/1")
+        injectScanNode(pipeline, Node { state ->
+            state.copy(
+                intake = com.jd.pipeline.source.IntakeContext.Email("e", "a@b.com", "s", "", "", false, true, false),
+                digestJobs = listOf(linkOnly, scraped),
+            )
+        })
+        val mockScrape = mock<ScrapeJdNode>()
+        whenever(mockScrape.process(any())).thenAnswer { (it.arguments[0] as JDState).copy(jdText = "scraped") }
+        pipeline.scrapeNode = mockScrape
+        injectSaveNode(pipeline, Node { it })
+
+        val result = pipeline.invoke(JDState())
+
+        verify(mockScrape, times(1)).process(any())
+        assertEquals(listOf("", "scraped"), result.digestJobs.map { it.jdText })
+        assertTrue(result.digestJobs.first().submitAsUrl)
     }
 }

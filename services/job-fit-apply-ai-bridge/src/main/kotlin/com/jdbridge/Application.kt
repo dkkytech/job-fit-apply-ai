@@ -10,6 +10,7 @@ import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.plugins.cors.routing.*
 import io.ktor.server.routing.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
@@ -40,6 +41,13 @@ fun main() {
 
     val hosts = resolveBindHosts(tailscaleHost)
     log.info("jd-bridge binding to ${hosts.joinToString(", ")} on port $port")
+
+    // Postgres DDL the bridge owns (track_events): production never re-runs db/init. Here rather
+    // than in configureApplication, which tests boot with the default DSN — the real database.
+    // Best-effort: the queue must not depend on Postgres, and the events routes retry it lazily.
+    runCatching { runBlocking { TracksStore.ensureSchema() } }
+        .onSuccess { log.info("track_events schema ensured") }
+        .onFailure { log.warn("track_events schema not ensured at startup (${it.message}) — will retry on first use") }
 
     val env = applicationEngineEnvironment {
         for (h in hosts) connector { host = h; this.port = port }

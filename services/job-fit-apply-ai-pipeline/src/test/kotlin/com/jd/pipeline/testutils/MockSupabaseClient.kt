@@ -119,6 +119,22 @@ class MockSupabaseClient : SupabaseGateway {
         return filtered.take(limit).map { mapper.valueToTree(it) }
     }
 
+    var updateCalls = mutableListOf<Triple<String, Map<String, Any?>, String>>()
+
+    override fun update(table: String, record: Map<String, Any?>, filterCol: String, filterVal: String): JsonNode {
+        if (shouldFailPatch) throw RuntimeException(failMessage)
+        updateCalls.add(Triple(table, record, "$filterCol=eq.$filterVal"))
+        val target = when (table) {
+            "jobs" -> jobs
+            "resume_artifacts" -> resumeArtifacts
+            "tracks" -> tracks
+            else -> return mapper.createObjectNode()
+        }
+        val row = target.firstOrNull { it[filterCol]?.toString() == filterVal } ?: return mapper.createObjectNode()
+        row.putAll(record)
+        return mapper.readTree(mapper.writeValueAsString(row))
+    }
+
     override fun delete(table: String, filterCol: String, filterVal: String) {
         val targetList = when (table) {
             "jobs" -> jobs

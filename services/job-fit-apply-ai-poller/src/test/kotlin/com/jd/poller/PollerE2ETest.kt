@@ -52,7 +52,7 @@ class PollerE2ETest {
     @DisplayName("intake → processor-completes → write-back, for a processed (non-recruiter) email")
     fun processedEmailRoundTrip() {
         val gmail = labelStubGmail().apply {
-            whenever(fetchIntakeEmails()).doReturn(listOf(RawEmail("m1", "Staff SDET", "jobs@board.com", "JD text", "", false)))
+            whenever(fetchIntakeEmails(any())).doReturn(listOf(RawEmail("m1", "Staff SDET", "jobs@board.com", "JD text", "", false)))
         }
 
         // 1. Intake: fetch from Gmail, submit to the bridge.
@@ -78,7 +78,7 @@ class PollerE2ETest {
     @DisplayName("recruiter email round-trips into a Gmail draft with downloaded attachments")
     fun recruiterEmailRoundTrip() {
         val gmail = labelStubGmail().apply {
-            whenever(fetchIntakeEmails()).doReturn(listOf(RawEmail("m2", "Great role for you", "Jane <jane@firm.com>", "hi", "", false)))
+            whenever(fetchIntakeEmails(any())).doReturn(listOf(RawEmail("m2", "Great role for you", "Jane <jane@firm.com>", "hi", "", false)))
             whenever(getMessageMeta("m2")).doReturn(GmailClient.MessageMeta("Jane <jane@firm.com>", "Great role for you"))
             whenever(createDraftReply(any(), any(), any(), any(), any())).doReturn("draft-1")
         }

@@ -1,0 +1,5 @@
+#!/usr/bin/with-contenv bash
+# A container restart leaves Chromium's Singleton* lock pointing at the old hostname; the new
+# Chromium then treats the profile as in use by another machine and never opens DevTools.
+# Nothing else can hold this profile at init, so the lock is always stale here.
+rm -f /config/apply-profile/SingletonLock /config/apply-profile/SingletonSocket /config/apply-profile/SingletonCookie

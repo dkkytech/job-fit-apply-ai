@@ -278,8 +278,12 @@ class MultiInstanceE2ETest {
         assertEquals(beforeTracks, sourceTracksCount(), "replay must not track anything in the source")
 
         // 7. Artifacts/events/notifications exist only in the test instance, once per company.
+        // Replay submits directly to the bridge rather than through runScenario(), so wait for
+        // each asynchronous notifier delivery before taking the exact-once snapshot below.
+        val replayedCompanies = listOf(companyJob, companyEmail, companyPage)
+        replayedCompanies.forEach(harness::awaitDiscordDelivery)
         val events = harness.completedEventsSince(testCursor)
-        for (company in listOf(companyJob, companyEmail, companyPage)) {
+        for (company in replayedCompanies) {
             assertEquals(
                 1, events.count { it.path("company").asText() == company },
                 "exactly one test completed event for '$company'",

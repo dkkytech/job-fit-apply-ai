@@ -3,6 +3,7 @@
 Run from the run-analyzer dir:  python3 -m unittest discover tests
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -20,7 +21,6 @@ from analyzer.audit import (  # noqa: E402
     select_candidates,
 )
 from analyzer.findings import fingerprint, slugify  # noqa: E402
-from analyzer.pending import Pending  # noqa: E402
 from analyzer.sources import join_window  # noqa: E402
 
 
@@ -74,6 +74,56 @@ class TestHistory(unittest.TestCase):
         self.assertEqual(history.baseline(d), {})
 
 
+class TestWeightedMedian(unittest.TestCase):
+    def test_matches_plain_median_when_weights_are_equal(self):
+        for vals in ([0.0, 0.1, 0.2], [0.0, 0.1, 0.2, 0.3], [0.4], [1.0, 0.0]):
+            self.assertEqual(history.weighted_median([(v, 7) for v in vals]),
+                             history._median(vals), msg=str(vals))
+
+    def test_no_usable_mass(self):
+        self.assertIsNone(history.weighted_median([]))
+        self.assertIsNone(history.weighted_median([(0.5, 0)]))     # zero-weight run
+        self.assertIsNone(history.weighted_median([(None, 5)]))
+
+    def test_heavy_window_outvotes_light_one(self):
+        # One 1-job window at 1.0 must not drag the median up against a 20-job window at 0.0.
+        self.assertEqual(history.weighted_median([(1.0, 1), (0.0, 20)]), 0.0)
+        # ...and symmetrically, mass on the high side wins.
+        self.assertEqual(history.weighted_median([(1.0, 20), (0.0, 1)]), 1.0)
+
+
+class TestBaselineWeighting(unittest.TestCase):
+    def test_many_tiny_windows_cannot_outvote_the_job_mass(self):
+        """Regression: three 1-job windows must not outvote two full windows.
+
+        Removing the cadence gate made tiny windows common, and a 1-job window's rate is
+        quantized to 0.0/1.0. Counting runs (the old behaviour) lets 3 jobs decide the trend
+        against 40; counting jobs does not. The plain median over these same values is 1.0,
+        so this case fails under equal weighting.
+        """
+        d = Path(tempfile.mkdtemp()) / "hist.jsonl"
+        for i in range(2):                                      # 2 healthy 20-job windows
+            history.append(d, f"big{i}", i, i + 1, 20, {"error_rate": 0.0})
+        for i in range(3):                                      # 3 one-job windows, all errored
+            history.append(d, f"tiny{i}", i, i + 1, 1, {"error_rate": 1.0})
+
+        self.assertEqual(history._median([0.0, 0.0, 1.0, 1.0, 1.0]), 1.0)   # equal-weight
+        base = history.baseline(d, window=10)
+        self.assertEqual(base["median"]["error_rate"], 0.0)                 # job-weighted
+        self.assertEqual(base["jobs"], 43)
+        self.assertEqual(base["runs"], 5)
+
+    def test_rows_without_window_jobs_still_score(self):
+        """History written before window_jobs existed must not vanish from the baseline."""
+        d = Path(tempfile.mkdtemp()) / "legacy.jsonl"
+        d.write_text("\n".join(
+            json.dumps({"run_ts": f"r{i}", "metrics": {"error_rate": r}})
+            for i, r in enumerate([0.0, 0.2, 0.4])) + "\n")
+        base = history.baseline(d, window=10)
+        self.assertEqual(base["median"]["error_rate"], 0.2)
+        self.assertEqual(base["jobs"], 3)                  # each legacy row counts as one job
+
+
 class TestFingerprint(unittest.TestCase):
     def test_stable_across_files_and_jobs(self):
         a = {"id": "run-log-missing", "category": "infra", "files": ["A.kt"], "affected_jobs": ["j1"]}
@@ -88,17 +138,6 @@ class TestFingerprint(unittest.TestCase):
     def test_slugify(self):
         self.assertEqual(slugify("All Jobs Scored 0!"), "all-jobs-scored-0")
         self.assertEqual(slugify(""), "finding")
-
-
-class TestPending(unittest.TestCase):
-    def test_read_write_clear(self):
-        p = Pending(Path(tempfile.mkdtemp()) / "pending")
-        self.assertIsNone(p.read())          # unset
-        p.write(1234.5)
-        self.assertAlmostEqual(p.read(), 1234.5)
-        p.clear()
-        self.assertIsNone(p.read())
-        p.clear()                            # idempotent, no raise
 
 
 class TestSourcesJoin(unittest.TestCase):

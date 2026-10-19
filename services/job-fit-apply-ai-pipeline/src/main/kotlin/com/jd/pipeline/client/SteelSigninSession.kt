@@ -230,6 +230,8 @@ class SteelSigninSession(
                 key.contains("glassdoor") -> "https://www.glassdoor.com/profile/login_input.htm"
                 key.contains("jobright") -> "https://jobright.ai/?login=true"
                 key.contains("indeed") -> "https://secure.indeed.com/auth"
+                // Monster's wall is a DataDome bot check, not a login; its home page shows the check.
+                key.contains("monster") -> "https://www.monster.com/"
                 // A bare host we don't have a login page for: its root will redirect to sign-in.
                 key.contains('.') -> runCatching { URI("https://$key/").toString() }.getOrNull()
                 else -> null

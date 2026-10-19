@@ -6,6 +6,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.sql.update
+import java.sql.DriverManager
 import kotlin.test.*
 
 class StoreEnqueueTest {
@@ -47,6 +50,33 @@ class StoreEnqueueTest {
         val jobId = enqueue(defaultJdJson(), "https://example.com/job/1", "email-abc")
         val row = getJob(jobId)!!
         assertEquals("https://example.com/job/1", row.jobUrl)
+    }
+}
+
+class StoreSchemaCompatibilityTest {
+    @Test
+    fun `initDb adds retry columns to an existing queue database`() = runTest {
+        val dir = useTempStoreDir()
+        DriverManager.getConnection("jdbc:sqlite:${dir.resolve("jobs.db")}").use { db ->
+            db.createStatement().use { it.executeUpdate("""
+                CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY, status TEXT NOT NULL, type TEXT NOT NULL, jd_json TEXT,
+                    job_url TEXT, idempotency_key TEXT, fit_score INTEGER, pipeline_action TEXT,
+                    artifacts_json TEXT, company TEXT, role_title TEXT, artifact_url TEXT, error TEXT,
+                    claimed_at INTEGER, claim_token TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                    terminal_label TEXT, draft_text TEXT, is_recruiter BOOLEAN NOT NULL DEFAULT 0,
+                    message_id TEXT, writeback_done BOOLEAN NOT NULL DEFAULT 0, completed_seq INTEGER
+                )
+            """.trimIndent()) }
+        }
+        initDb()
+        val jobId = enqueue(defaultJdJson(), null, null)
+        assertEquals(JobStatus.PENDING.value, getJob(jobId)!!.status)
+        assertEquals(0, getJob(jobId)!!.retryCount)
+
+        // track_id is ALTERed on too (the legacy table above predates it) and round-trips.
+        recordResult(jobId, ResultRequest(pipeline_action = "tailor", fit_score = 80, track_id = 17))
+        assertEquals(17, getJob(jobId)!!.trackId)
     }
 }
 
@@ -137,6 +167,78 @@ class StoreRecordResultTest {
         claimNext()
         recordResult(jobId, ResultRequest(pipeline_action = "SKIP", fit_score = 0))
         assertEquals(0, getJob(jobId)!!.fitScore)
+    }
+
+    @Test
+    fun `retryable result is requeued without a terminal completion`() = runTest {
+        val jobId = enqueue(defaultJdJson(), null, null)
+        val firstClaim = claimNext()!!
+
+        val outcome = recordResult(
+            jobId,
+            ResultRequest(
+                pipeline_action = "SKIP",
+                fit_score = 0,
+                error = "LLM HTTP 429 from Ollama Cloud",
+                retryable = true,
+                claim_token = firstClaim.claimToken,
+            ),
+        )
+
+        assertEquals(ResultOutcome.REQUEUED, outcome)
+        val row = getJob(jobId)!!
+        assertEquals(JobStatus.PENDING.value, row.status)
+        assertNull(row.completedSeq)
+        assertNull(row.terminalLabel)
+        assertNull(claimNext(), "backoff must defer the retry instead of reclaiming it immediately")
+    }
+
+    @Test
+    fun `retryable failures use bounded exponential backoff then become terminal`() = runTest {
+        val jobId = enqueue(defaultJdJson(), null, null)
+        repeat(3) { attempt ->
+            val claim = claimNext()!!
+            val before = System.currentTimeMillis() / 1000L
+            assertEquals(ResultOutcome.REQUEUED, recordResult(
+                jobId, ResultRequest("SKIP", 0, error = "LLM HTTP 429", retryable = true, claim_token = claim.claimToken),
+            ))
+            val row = getJob(jobId)!!
+            assertEquals(attempt + 1, row.retryCount)
+            assertTrue(row.nextAttemptAt!! >= before + 30L * (1L shl attempt))
+            assertNull(row.completedSeq)
+            transaction { Jobs.update({ Jobs.id eq jobId }) { it[Jobs.nextAttemptAt] = 0L } }
+        }
+        val finalClaim = claimNext()!!
+        assertEquals(ResultOutcome.RECORDED, recordResult(
+            jobId, ResultRequest("SKIP", 0, error = "LLM HTTP 429", retryable = true, claim_token = finalClaim.claimToken),
+        ))
+        val terminal = getJob(jobId)!!
+        assertEquals(JobStatus.ERROR.value, terminal.status)
+        assertEquals(3, terminal.retryCount)
+        assertEquals("JD_Error", terminal.terminalLabel)
+        assertEquals("LLM HTTP 429", terminal.error)
+        assertNotNull(terminal.completedSeq)
+    }
+
+    @Test
+    fun `successful retry clears the previous transient error`() = runTest {
+        val jobId = enqueue(defaultJdJson(), null, null)
+        val failedClaim = claimNext()!!
+        assertEquals(ResultOutcome.REQUEUED, recordResult(
+            jobId,
+            ResultRequest("SKIP", 0, error = "LLM HTTP 429", retryable = true, claim_token = failedClaim.claimToken),
+        ))
+        transaction { Jobs.update({ Jobs.id eq jobId }) { it[Jobs.nextAttemptAt] = 0L } }
+
+        val retryClaim = claimNext()!!
+        assertEquals(ResultOutcome.RECORDED, recordResult(
+            jobId,
+            ResultRequest("TAILOR", 85, claim_token = retryClaim.claimToken),
+        ))
+
+        val completed = getJob(jobId)!!
+        assertEquals(JobStatus.DONE.value, completed.status)
+        assertNull(completed.error)
     }
 }
 
@@ -259,6 +361,29 @@ class StoreDedupTest {
     }
 
     @Test
+    fun `career-site submissions dedup against month-old jobs, other sources do not`() = runTest {
+        val jobId = enqueue(defaultJdJson(), null, "watchlist:greenhouse:acme:42")
+        val thirtyDaysAgo = System.currentTimeMillis() / 1000L - 30L * 24 * 3600
+        transaction { Jobs.update({ Jobs.id eq jobId }) { it[Jobs.createdAt] = thirtyDaysAgo } }
+
+        assertEquals(jobId, findActiveDuplicate(null, "watchlist:greenhouse:acme:42", "CAREER_SITE"))
+        assertNull(findActiveDuplicate(null, "watchlist:greenhouse:acme:42", "JSEARCH"))
+        assertNull(findActiveDuplicate(null, "watchlist:greenhouse:acme:42"))
+    }
+
+    @Test
+    fun `dedupWindowHours uses per-source default, env override, then global`() {
+        val noEnv: (String) -> String? = { null }
+        assertEquals(72L, dedupWindowHours(null, noEnv))
+        assertEquals(72L, dedupWindowHours("JSEARCH", noEnv))
+        assertEquals(1440L, dedupWindowHours("CAREER_SITE", noEnv))
+        assertEquals(1440L, dedupWindowHours(" career_site ", noEnv))
+        val env = mapOf("JD_BRIDGE_DEDUP_WINDOW_HOURS_CAREER_SITE" to "720", "JD_BRIDGE_DEDUP_WINDOW_HOURS_EMAIL" to "24")
+        assertEquals(720L, dedupWindowHours("CAREER_SITE", env::get))
+        assertEquals(24L, dedupWindowHours("EMAIL", env::get))
+    }
+
+    @Test
     fun `findActiveDuplicate returns null for error status job`() = runTest {
         val jobId = enqueue(defaultJdJson(), "https://ex.com/2", null)
         claimNext()
@@ -376,6 +501,37 @@ class StoreCompletionReliabilityTest {
         assertEquals(firstSeq, row.completedSeq, "a duplicate must not re-sequence the job")
         assertEquals("TAILOR", row.pipelineAction, "first result wins; the duplicate must not overwrite it")
         assertEquals(headAfterFirst, latestCompletedSeq(), "an ignored result must not consume a sequence number")
+    }
+
+    @Test
+    fun `a displaced retryable result cannot requeue the replacement claim`() = runTest {
+        val jobId = enqueue(defaultJdJson(), null, null)
+        val displaced = claimNext()!!
+        expireClaim(jobId)
+        val replacement = claimNext()!!
+        val before = getJob(jobId)!!
+
+        val late = recordResult(
+            jobId,
+            ResultRequest(
+                pipeline_action = "SKIP",
+                fit_score = 0,
+                error = "LLM HTTP 429",
+                retryable = true,
+                claim_token = displaced.claimToken,
+            ),
+        )
+
+        assertEquals(ResultOutcome.STALE_CLAIM, late)
+        val after = getJob(jobId)!!
+        assertEquals(JobStatus.CLAIMED.value, after.status)
+        assertEquals(before.retryCount, after.retryCount)
+        assertEquals(before.nextAttemptAt, after.nextAttemptAt)
+        assertEquals(before.error, after.error)
+        assertNull(after.completedSeq)
+
+        assertEquals(ResultOutcome.RECORDED, recordResult(jobId, tailorResult(replacement.claimToken)))
+        assertEquals(JobStatus.DONE.value, getJob(jobId)!!.status)
     }
 
     @Test

@@ -11,7 +11,7 @@ object LlmDigestStrategy : BoardDigestStrategy {
     private val mapper = ObjectMapper()
 
     private val llm by lazy {
-        LlmClient.fromModelString(Config.SCAN_MODEL, jsonMode = true, temperature = 0.0, nodeKey = "digest_llm")
+        LlmClient.forIngest(Config.SCAN_MODEL, jsonMode = true, temperature = 0.0, nodeKey = "digest_llm")
     }
 
     override fun expand(parent: JDState, email: IntakeContext.Email): List<JDState> {

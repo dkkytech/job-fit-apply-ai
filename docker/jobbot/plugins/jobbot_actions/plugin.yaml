@@ -1,0 +1,4 @@
+name: jobbot_actions
+version: 1.0.0
+description: JFAA card buttons (apply / reply / archive / undo) and /jdstatus, routed to jobbot-mcp
+provides_hooks: [post_tool_call]

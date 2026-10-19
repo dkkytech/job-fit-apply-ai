@@ -98,6 +98,7 @@ class ProcessingPipelineTest {
         assertEquals("SKIP", result.pipelineAction)
         assertNotNull(result.error)
         assertTrue(result.error!!.contains("simulated scoreFit failure"))
+        assertEquals(TerminalLabel.JD_ERROR, result.terminalLabel)
     }
 
     @Test
@@ -112,6 +113,34 @@ class ProcessingPipelineTest {
         val result = pipeline.invoke(minimalRecord())
 
         assertTrue(result.isDuplicate)
+    }
+
+    @Test
+    @DisplayName("result carries the tracks row id that supabaseTrack wrote")
+    fun resultCarriesTrackId() {
+        // The completed feed hands this id to consumers (JobBot) so they can record lifecycle
+        // events against the job's tracks row.
+        val pipeline = ProcessingPipeline()
+        injectNode(pipeline, "checkDuplicate", Node { state -> state.copy(isDuplicate = false) })
+        injectNode(pipeline, "scoreFit", Node { state -> state.copy(pipelineAction = PipelineAction.SKIP, fitScore = 30f) })
+        injectNode(pipeline, "supabaseTrack", Node { state -> state.copy(isSupabaseTracked = true, trackId = 42) })
+
+        val result = pipeline.invoke(minimalRecord())
+
+        assertEquals(42, result.trackId)
+    }
+
+    @Test
+    @DisplayName("result trackId is null when no tracks row was written")
+    fun resultTrackIdNullWithoutTrack() {
+        val pipeline = ProcessingPipeline()
+        injectNode(pipeline, "checkDuplicate", Node { state -> state.copy(isDuplicate = true) })
+        // Tracking failed: the node records an error and never sets trackId.
+        injectNode(pipeline, "supabaseTrack", Node { state -> state.copy(error = "supabase_track: down") })
+
+        val result = pipeline.invoke(minimalRecord())
+
+        assertNull(result.trackId)
     }
 
     @Test
@@ -229,6 +258,45 @@ class ProcessingPipelineTest {
     }
 
     @Test
+    @DisplayName("a failed draft reply keeps the tailored job and still flags it Recruiter_Response_Required")
+    fun draftFailureKeepsTheJob(@TempDir tempDir: Path) {
+        // The draft is composed after the résumé and cover letter exist. A draft-model timeout
+        // used to fail the whole job as JD_Error and throw that work away.
+        val pipeline = tailorPipeline(tempDir, DraftReplyComposer(generate = {
+            throw com.jd.pipeline.client.TransientLlmFailure("LLM call to https://ollama.com/api/chat failed: request timed out")
+        }))
+
+        val result = pipeline.invoke(recruiterRecord())
+
+        assertNull(result.error)
+        assertNull(result.draftText)
+        assertEquals("TAILOR", result.pipelineAction)
+        assertEquals(TerminalLabel.RECRUITER, result.terminalLabel)
+        assertEquals(tempDir.toString(), result.outputPath)
+    }
+
+    @Test
+    @DisplayName("a transient failure is returned retryable with no terminal label, not as JD_Error")
+    fun transientFailureIsRetryable() {
+        // ScoreFitNode wraps a provider timeout in RetryableLlmError so the bridge can retry it.
+        // invoke() used to catch it and label it JD_Error, so it never reached the retry queue.
+        val pipeline = ProcessingPipeline()
+        injectNode(pipeline, "checkDuplicate", Node { state -> state.copy(isDuplicate = false) })
+        injectNode(pipeline, "scoreFit", Node { _ ->
+            throw com.jd.pipeline.client.RetryableLlmError(
+                "score_fit: LLM call to http://llm/v1/chat/completions exceeded hard timeout of 195s",
+                com.jd.pipeline.client.TransientLlmFailure("exceeded hard timeout of 195s"),
+            )
+        })
+
+        val result = pipeline.invoke(minimalRecord())
+
+        assertTrue(result.retryable)
+        assertNull(result.terminalLabel)
+        assertNotNull(result.error)
+    }
+
+    @Test
     @DisplayName("invoke calls MetadataUtils.writeMetadata after addArtifactUrl")
     fun invokeCallsWriteMetadataAfterAddArtifactUrl(@TempDir tempDir: Path) {
         val pipeline = ProcessingPipeline()
@@ -289,6 +357,107 @@ class ProcessingPipelineTest {
         // When outputPath is blank, writeMetadata should be a no-op
         assertEquals(null, result.outputPath)
         assertEquals("SKIP", result.pipelineAction)
+    }
+
+    @Test
+    @DisplayName("a pay-gated high fit gets scoring notes (report.md + artifact URL) beside score_fit.txt, no tailoring")
+    fun gatedHighFitGetsScoringNotes(@TempDir tempDir: Path) {
+        val pipeline = ProcessingPipeline()
+        injectNode(pipeline, "checkDuplicate", Node { state -> state.copy(isDuplicate = false) })
+        injectNode(pipeline, "scoreFit", Node { state ->
+            state.copy(
+                pipelineAction = PipelineAction.SKIP,
+                fitScore = 90f,
+                company = "Sparksoft",
+                roleTitle = "Automation Engineer",
+                hardGateViolations = listOf("Posted pay (max \$85K) is below the \$145K target"),
+                skippedReason = "Hard gate: Posted pay (max \$85K) is below the \$145K target",
+                scoreOutputPath = tempDir.toString(),
+            )
+        })
+        injectNode(pipeline, "tailorSubgraph", Node { _ -> error("a skipped job is never tailored") })
+        injectNode(pipeline, "addArtifactUrl", Node { state -> state.copy(artifactUrl = "https://markserv.example/${state.outputPath.substringAfterLast('/')}/") })
+        injectNode(pipeline, "supabaseTrack", Node { state -> state })
+
+        val result = pipeline.invoke(minimalRecord())
+
+        assertEquals("SKIP", result.pipelineAction)
+        assertEquals(tempDir.toString(), result.outputPath)
+        assertEquals("https://markserv.example/${tempDir.fileName}/", result.artifactUrl)
+        assertEquals("Posted pay (max \$85K) is below the \$145K target", result.skipReason)
+        val report = Files.readString(tempDir.resolve("report.md"))
+        assertTrue(report.contains("Posted pay (max \$85K) is below the \$145K target"), "the report says why it was skipped")
+        assertTrue(Files.exists(tempDir.resolve("metadata.json")))
+    }
+
+    @Test
+    @DisplayName("a gated job below the threshold gets no notes (no card goes out for it)")
+    fun gatedLowFitGetsNoNotes(@TempDir tempDir: Path) {
+        val pipeline = ProcessingPipeline()
+        injectNode(pipeline, "checkDuplicate", Node { state -> state.copy(isDuplicate = false) })
+        injectNode(pipeline, "scoreFit", Node { state ->
+            state.copy(pipelineAction = PipelineAction.SKIP, fitScore = 20f,
+                hardGateViolations = listOf("Pure manual QA"), scoreOutputPath = tempDir.toString())
+        })
+        injectNode(pipeline, "supabaseTrack", Node { state -> state })
+
+        val result = pipeline.invoke(minimalRecord())
+
+        assertEquals(null, result.outputPath)
+        assertEquals(null, result.artifactUrl)
+        assertEquals("Pure manual QA", result.skipReason)
+        assertFalse(Files.exists(tempDir.resolve("report.md")))
+    }
+
+    @Test
+    @DisplayName("skip_reason: the threshold reason for an ungated skip, nothing for a tailored job")
+    fun skipReasonOnlyForSkips() {
+        val pipeline = ProcessingPipeline()
+        injectNode(pipeline, "checkDuplicate", Node { state -> state.copy(isDuplicate = false) })
+        injectNode(pipeline, "scoreFit", Node { state ->
+            state.copy(pipelineAction = PipelineAction.SKIP, fitScore = 30f, skippedReason = "Fit score below threshold")
+        })
+        injectNode(pipeline, "supabaseTrack", Node { state -> state })
+        assertEquals("Fit score below threshold", pipeline.invoke(minimalRecord()).skipReason)
+    }
+
+    @Test
+    @DisplayName("the result carries the card details: location, remote policy, salary, source, strengths, gaps")
+    fun resultCarriesCardDetails() {
+        val pipeline = ProcessingPipeline()
+        injectNode(pipeline, "checkDuplicate", Node { state -> state.copy(isDuplicate = false) })
+        injectNode(pipeline, "scoreFit", Node { state ->
+            state.copy(
+                pipelineAction = PipelineAction.SKIP, fitScore = 30f, remotePolicy = "hybrid", salaryRange = "\$150K–\$180K",
+                strengths = listOf("Kotlin test infrastructure"), gaps = listOf("No Pact experience", "Mid-level scope"),
+            )
+        })
+        injectNode(pipeline, "supabaseTrack", Node { state -> state })
+
+        val result = pipeline.invoke(minimalRecord().copy(jobUrl = "https://www.jobright.ai/jobs/info/abc"))
+
+        assertEquals("Seattle, WA", result.location)
+        assertEquals("hybrid", result.remotePolicy)
+        assertEquals("\$150K–\$180K", result.salaryRange)
+        assertEquals("jobright.ai", result.source)
+        assertEquals(listOf("Kotlin test infrastructure"), result.strengths)
+        assertEquals(listOf("No Pact experience", "Mid-level scope"), result.gaps)
+    }
+
+    @Test
+    @DisplayName("card details: an unknown remote policy and a blank salary are null; a recruiter email is the source")
+    fun cardDetailsUnknownsAndRecruiter() {
+        val pipeline = ProcessingPipeline()
+        injectNode(pipeline, "checkDuplicate", Node { state -> state.copy(isDuplicate = false) })
+        injectNode(pipeline, "scoreFit", Node { state -> state.copy(pipelineAction = PipelineAction.SKIP, fitScore = 30f) })
+        injectNode(pipeline, "tailorSubgraph", Node { state -> state.copy(error = "stop here") })
+        injectNode(pipeline, "supabaseTrack", Node { state -> state })
+
+        val plain = pipeline.invoke(minimalRecord())
+        assertNull(plain.remotePolicy, "\"unknown\" is not shown")
+        assertNull(plain.salaryRange)
+        assertNull(plain.source, "no job board, no URL")
+        assertEquals("recruiter email", pipeline.invoke(recruiterRecord()).source)
     }
 
     @Test

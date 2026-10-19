@@ -12,9 +12,7 @@ feed (`GET /api/jobs/completed`) with its own independent cursor.
 
 ## How a run works
 
-1. **Cadence gate** — drain the cursor→head delta. If fewer than `MIN_BATCH` new jobs have accrued
-   and the oldest has waited < `MAX_DEFER_HOURS`, **defer** (leave the cursor; re-accrue). This
-   decouples window size from arrival rate so a slow day doesn't degrade into per-job analysis.
+1. **Cursor delta** — drain and immediately analyze every non-empty cursor→head delta.
 2. **Two windows** — the **report window** (the new jobs; findings anchor here) plus a read-only
    **context window** of the last `CONTEXT_N` completed jobs, for rates / per-board patterns /
    regressions. The bridge feed is the spine; `run_log.jsonl` (via `RunReport.kt`) enriches each
@@ -31,17 +29,21 @@ feed (`GET /api/jobs/completed`) with its own independent cursor.
 6. **Delta + notify** — classify each finding vs the findings ledger as NEW / WORSENING / UNCHANGED;
    Discord/Telegram is pinged **only for what changed** (steady state stays quiet).
 7. **Outcome loop** — reconcile merged autofix PRs (`gh`), then check whether each fixed finding's
-   target metric recovered over `RESOLVE_RUNS` runs before vs after the merge → **resolved**
-   (auto-retire) or **regressed** (fix didn't help).
+   target metric recovered before vs after the merge → **resolved** (auto-retire) or
+   **regressed** (fix didn't help). A verdict needs `RESOLVE_RUNS` runs *and*
+   `RESOLVE_MIN_JOBS` jobs on each side; thinner evidence defers to a later run.
 
-Empty/deferred windows exit before any model call, so frequent scheduling is cheap.
+Trend metrics are **job-weighted**: a run's rate is an estimate whose precision scales with its
+window size (a 1-job window reports 0.0 or 1.0 and nothing between), so the rolling baseline and
+the outcome medians weight each run by `window_jobs` rather than counting runs equally.
+
+Empty windows exit before any model call, so frequent scheduling is cheap.
 
 ### Package layout
 
 ```
 analyzer/
   cursor.py         persisted independent completed_seq cursor (mirror of Cursor.kt)
-  pending.py        'pending since' marker for the accumulate-until-N-or-T gate
   bridge.py         HTTP client for GET /api/jobs/completed(+/head, +fetch_last)
   sources.py        assemble a window: bridge spine + run_log enrichment
   metrics.py        deterministic aggregate + rate metrics
@@ -64,7 +66,7 @@ run_analyzer.sh     driver (cursor consumer; PATH/CA hardening; single-instance 
 # analysis + trend + notify (cheap; run hourly on the schedule)
 ./tuner/run-analyzer/run_analyzer.sh
 
-# gated auto-fix -> living draft PR -> notify (run daily; opt-in)
+# gated auto-fix -> living draft PR -> notify (run twice daily; opt-in)
 RUN_ANALYZER_AUTOFIX=1 ./tuner/run-analyzer/run_analyzer.sh --autofix
 
 # one-off with a stronger cloud model
@@ -80,11 +82,10 @@ Config (env; `run_analyzer.sh` also reads these from
 |---|---|---|
 | `RUN_ANALYZER_MODEL` | `Qwen3.5-9B-OptiQ-4bit` (local oMLX) | analysis model (deployed: `deepseek-v4-pro:ollama-cloud`) |
 | `JD_BRIDGE_URL` | `http://127.0.0.1:8765` | bridge base URL |
-| `RUN_ANALYZER_MIN_BATCH` | `10` | analyze once ≥ N new jobs accrue |
-| `RUN_ANALYZER_MAX_DEFER_HOURS` | `6` | force a run after T hours waiting |
 | `RUN_ANALYZER_CONTEXT_N` | `40` | rolling context-window size |
 | `RUN_ANALYZER_AUDIT_MAX` | `8` | max jobs deep-audited per run (0 disables) |
 | `RUN_ANALYZER_RESOLVE_RUNS` | `3` | runs each side of a merge to judge outcome |
+| `RUN_ANALYZER_RESOLVE_MIN_JOBS` | `30` | jobs each side of a merge to judge outcome (runs alone are not evidence) |
 | `RUN_ANALYZER_AUTOFIX` | *(off)* | set `1` to arm the `--autofix` loop |
 | `RUN_ANALYZER_AUTOFIX_SEVERITY` | `high` | min severity to auto-fix (`high` \| `medium` \| `low`) |
 | `MLX_LOCAL_BASE_URL` / `MLX_API_KEY` | oMLX local | OpenAI-wire backend |
@@ -101,7 +102,6 @@ to route to Ollama Cloud (`Bearer $OLLAMA_API_KEY`).
 ## State (gitignored, under `state/`)
 
 - `cursor` — last consumed `completed_seq`.
-- `pending_since` — epoch of the oldest unanalyzed job (accumulate-until-N-or-T gate).
 - `metrics_history.jsonl` — append-only per-run metrics (rolling baseline; Phase 2).
 - `findings_ledger.jsonl` — per-fingerprint finding history for NEW/WORSENING/RESOLVED classification.
 - `autofix_ledger.jsonl` — fingerprints handled by the autofix loop (`pr_open` → `pr_merged`); the
@@ -119,11 +119,12 @@ LLM, or live services). Run from this directory:
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-`tests/test_units.py` covers the pure logic (metrics, history/baseline, fingerprint, pending,
+`tests/test_units.py` covers the pure logic (metrics, history/job-weighted baseline, fingerprint,
 run_log join, audit grounding/triage); `tests/test_findings_ledger.py` the NEW/WORSENING/UNCHANGED
 classifier; `tests/test_detectors.py` the deterministic detectors (per-board grouping, share-gating);
 `tests/test_outcomes.py` the finding→fix→outcome loop (merge reconciliation, metric-recovery
-resolved/regressed); `tests/test_integration.py` the cadence-gate decision table and the full
+resolved/regressed, and the job-mass floor that stops tiny windows auto-retiring a finding);
+`tests/test_integration.py` cursor-window decisions and the full
 `analyze.py` flow (delta + ledger + history, cross-run dedup, deterministic-findings-survive-outage,
 malformed-model degradation). Also run in CI
 (`.github/workflows/ci.yml` → `run-analyzer`).
@@ -137,20 +138,18 @@ CLI, and the `claude` CLI.
 ## Scheduling
 
 Two committed launchd plists (see `scripts/com.jd.run-analyzer*.plist`): the hourly analysis
-job and the daily gated `--autofix` job. A shared single-instance lock
+job and the gated `--autofix` job at 07:00 and 19:00 local time. A shared single-instance lock
 (`/tmp/jd-run-analyzer.lock`) guarantees they never overlap (the autofix git ops must not race
 the analysis run). The findings task files can be reviewed directly, fed to a coding session
 via each file's "Agent prompt" section, or applied by the `--autofix` loop.
 
 ## Operational checks (what a healthy run looks like)
 
-Logs: `/tmp/jd-run-analyzer.{out,err}.log`. On a tick you'll see either `defer …` /
+Logs: `/tmp/jd-run-analyzer.{out,err}.log`. On a tick you'll see either
 `no new completed jobs` (cheap, no model call) or a real `analysis mode` → `health=… batch=N
-context=40 … findings=X new=Y worsening=Z resolved=… regressed=…` line at exit 0. To watch the
-first **non-deferred** run, look for:
+context=40 … findings=X new=Y worsening=Z resolved=… regressed=…` line at exit 0. To verify a run, look for:
 
-1. **It actually analyzed** — a `batch=N` line (N ≥ `MIN_BATCH`, or a `defer` that later flips
-   after `MAX_DEFER_HOURS`), not perpetual `defer`.
+1. **It actually analyzed** — any non-empty cursor delta produces a `batch=N` line.
 2. **Model call succeeded** — `.err.log` has no `CERTIFICATE_VERIFY_FAILED`. If `health=unknown`
    with "model unavailable", the cloud call is failing (check the CA bundle / `SSL_CERT_FILE`);
    deterministic findings should still be written (exit 1).
@@ -159,7 +158,7 @@ first **non-deferred** run, look for:
    also blinds the audit's `jdTextLen`/`outputPath`). A few stragglers stay below the threshold.
 4. **Audit coverage** — the `[audit] candidates=N audited=M` line; `audited=0` usually means the
    per-job output dirs / tracks weren't readable (often tied to run-log-missing).
-5. **Notification** — with `DISCORD_*` or analyzer-specific/legacy Telegram credentials set, a first non-deferred run pings once
+5. **Notification** — with `DISCORD_*` or analyzer-specific/legacy Telegram credentials set, a first non-empty run pings once
    (everything is NEW). No ping ⇒ blank creds or nothing new/worsening.
 6. **Trend warms up** — `state/metrics_history.jsonl` grows one line per non-empty run; the
    rolling baseline (and regression judgement) only becomes meaningful after several runs.

@@ -31,6 +31,12 @@ class EmailResolutionTest {
     }
 
     @Test
+    fun `an application update is skipped with its own disposition, not as a non-job`() {
+        val s = JDState(isJobPosting = false, isApplicationUpdate = true, intake = email())
+        assertEquals(EmailDisposition.SkipApplicationUpdate, EmailResolution.classify(s))
+    }
+
+    @Test
     fun `a failed scan is an Error, not a clean non-job skip`() {
         // ScanEmailNode catches a transient LLM error (e.g. oMLX 507) and returns
         // isJobPosting=false WITH error set. That must NOT be labeled JD_Not_Found.
@@ -38,6 +44,50 @@ class EmailResolutionTest {
         val disposition = EmailResolution.classify(s)
         assertTrue(disposition is EmailDisposition.Error, "errored scan must classify as Error, got $disposition")
         assertEquals("scan_email: LLM HTTP 507", (disposition as EmailDisposition.Error).message)
+    }
+
+    @Test
+    fun `terminal scrape failure is distinct from a transient ingestion error`() {
+        val state = JDState(
+            isJobPosting = true,
+            intake = email(),
+            jobUrl = "https://jobs.example.com/123",
+            error = "scrape_jd: HTTP 403 blocked",
+            scrapePath = "blocked",
+        )
+
+        assertEquals(
+            EmailDisposition.ScrapeTerminal(ScrapeTerminalReason.BLOCKED, state.error),
+            EmailResolution.classify(state),
+        )
+    }
+
+    @Test
+    fun `a blocked-path rate limit remains a retryable ingestion error`() {
+        val state = JDState(
+            isJobPosting = true,
+            intake = email(),
+            error = "scrape_jd: HTTP 429 — rate-limited",
+            scrapePath = "blocked",
+        )
+
+        assertEquals(EmailDisposition.Error(state.error), EmailResolution.classify(state))
+    }
+
+    @Test
+    fun `terminal scrape outcome takes precedence over digest fan-out`() {
+        val state = JDState(
+            isJobPosting = false,
+            intake = email(isDigest = true),
+            error = "scrape_jd: CAPTCHA widget detected",
+            scrapePath = "cdp_fallback",
+            digestJobs = listOf(JDState(isJobPosting = true, company = "must not fan out")),
+        )
+
+        assertEquals(
+            EmailDisposition.ScrapeTerminal(ScrapeTerminalReason.BLOCKED, state.error),
+            EmailResolution.classify(state),
+        )
     }
 
     @Test

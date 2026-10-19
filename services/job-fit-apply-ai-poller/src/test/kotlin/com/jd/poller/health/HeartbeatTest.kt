@@ -45,6 +45,27 @@ class HeartbeatTest {
     }
 
     @Test
+    @DisplayName("markAuthFailed records a reason in a sibling file; clearAuthFailure removes it")
+    fun authFailureMarker(@TempDir dir: Path) {
+        val hb = Heartbeat(dir.resolve("hb"))
+        assertNull(hb.authFailure(), "no marker by default")
+
+        hb.markAuthFailed("invalid_grant - run --reauth")
+        assertEquals("invalid_grant - run --reauth", hb.authFailure())
+        assertTrue(dir.resolve("hb.auth-failed").toFile().exists())
+
+        hb.clearAuthFailure()
+        assertNull(hb.authFailure())
+    }
+
+    @Test
+    @DisplayName("an empty auth-failure marker still reports a failure")
+    fun emptyAuthFailureMarker(@TempDir dir: Path) {
+        dir.resolve("hb.auth-failed").toFile().writeText("")
+        assertEquals("Gmail auth failed - run --reauth", Heartbeat(dir.resolve("hb")).authFailure())
+    }
+
+    @Test
     @DisplayName("small clock skew (beat slightly in the future) still counts as fresh")
     fun toleratesSkew(@TempDir dir: Path) {
         val hb = Heartbeat(dir.resolve("hb"))

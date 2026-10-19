@@ -22,6 +22,7 @@ object MetadataUtils {
         is IntakeContext.Api -> "api"
         is IntakeContext.Synthetic -> "synthetic"
         is IntakeContext.WebCapture -> "extension"
+        is IntakeContext.Link -> "url"
         null -> "unknown"
     }
 
@@ -58,6 +59,17 @@ object MetadataUtils {
         return metadataUrl
     }
 
+    /**
+     * Nothing upstream sets [JDState.jobBoard], so fall back to the posting URL's host
+     * ("jobright.ai", "dice.com"). Email click-trackers (SendGrid etc.) name no board, so they stay blank.
+     */
+    internal fun jobBoard(state: JDState): String {
+        if (state.jobBoard.isNotBlank()) return state.jobBoard
+        val host = runCatching { java.net.URI(state.jobUrl).host }.getOrNull()?.lowercase()?.removePrefix("www.") ?: return ""
+        val trackers = listOf("sendgrid.net", "mailchimp", "list-manage.com", "hubspotlinks", "mandrillapp.com", "click.", "links.", "email.")
+        return if (trackers.any { host.contains(it) }) "" else host
+    }
+
     private fun writeJson(
         state: JDState,
         generatedAt: String,
@@ -78,7 +90,7 @@ object MetadataUtils {
             if (state.yoeRequired != null) put("years_experience_required", state.yoeRequired) else putNull("years_experience_required")
             putNullable("salary_range", state.salaryRange.ifEmpty { null })
             set<com.fasterxml.jackson.databind.JsonNode>("tech_stack", mapper.valueToTree(state.techStack))
-            putNullable("job_board", state.jobBoard.ifEmpty { null })
+            putNullable("job_board", jobBoard(state).ifEmpty { null })
             if (state.fitScore != null) put("fit_score", state.fitScore) else putNull("fit_score")
             put("fit_threshold", Config.FIT_THRESHOLD)
             put("pipeline_action", state.pipelineAction.asDbValue() as String)
@@ -140,7 +152,8 @@ object MetadataUtils {
             appendLine("| Field | Value |")
             appendLine("|-------|-------|")
             appendLine("| Company | ${state.company.ifEmpty { "—" }} |")
-            appendLine("| Job Title | ${state.roleTitle.ifEmpty { "—" }} |")
+            // The title links to the posting, so there is no separate "Job Posting" row.
+            appendLine("| Job Title | ${titleCell(state)} |")
             appendLine("| Fit Score | $fitScoreDisplay |")
             appendLine("| Location | ${state.location.ifEmpty { "—" }} |")
             appendLine("| Remote Policy | ${state.remotePolicy.takeIf { it != "unknown" } ?: "—"} |")
@@ -149,8 +162,7 @@ object MetadataUtils {
             appendLine("| Seniority | ${state.seniorityLevel.ifEmpty { "—" }} |")
             appendLine("| YOE Required | ${state.yoeRequired?.toString() ?: "—"} |")
             appendLine("| Source | ${sourceCell(state)} |")
-            appendLine("| Job Board | ${state.jobBoard.ifEmpty { "—" }} |")
-            appendLine("| Job Posting | ${linkOrNA(state.jobUrl)} |")
+            appendLine("| Job Board | ${jobBoard(state).ifEmpty { "—" }} |")
             appendLine()
 
             // Artifacts
@@ -243,6 +255,11 @@ object MetadataUtils {
 
         Files.writeString(outputDir.resolve("report.md"), md)
         println("[metadata] Wrote report.md to $outputDir")
+    }
+
+    private fun titleCell(state: JDState): String {
+        val title = state.roleTitle.ifEmpty { "—" }
+        return if (state.jobUrl.isBlank()) title else linkOrNA(state.jobUrl, title)
     }
 
     private fun linkOrNA(url: String?, label: String = "URL"): String {

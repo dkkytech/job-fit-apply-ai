@@ -45,6 +45,20 @@ class NotifierTest {
     }
 
     @Test
+    @DisplayName("a high fit whose company was not extracted still notifies, as Unknown")
+    fun highFitWithoutCompanyIsUnknown() {
+        val c = mock<NotificationClient> {
+            on { discordConfigured } doReturn true
+            on { telegramConfigured } doReturn true
+            on { postDiscord(any()) } doReturn DeliveryResult.DELIVERED
+            on { postTelegramHtml(any()) } doReturn DeliveryResult.DELIVERED
+        }
+        Notifier(c, 50, buttonsEnabled = false).notify(job(company = null, role = " ", fit = 80))
+        verify(c).postTelegramHtml(argThat { lines().first() == "Unknown: Unknown (80)" })
+        verify(c).postDiscord(argThat { startsWith("• Unknown — ") })
+    }
+
+    @Test
     @DisplayName("non-job event (no company, no error) is skipped")
     fun nonJobSkipped() {
         val c = client()
@@ -69,7 +83,7 @@ class NotifierTest {
         val c = client()
         Notifier(c, fitThreshold = 50).notify(job(fit = 80))
         verify(c).postDiscord(any())
-        verify(c).postTelegramHtml(argThat { contains("High-fit") && contains("80") })
+        verify(c).postTelegramHtml(argThat { startsWith("Acme: ") && contains("(80)") && !contains("High-fit") })
     }
 
     @Test

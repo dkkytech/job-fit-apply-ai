@@ -27,7 +27,7 @@ import java.util.regex.Pattern
  * All JSON parsing uses Jackson — no regex field extraction.
  */
 class ScanEmailNode(
-    private val llm: LlmCaller = LlmClient.fromModelString(Config.SCAN_MODEL, jsonMode = true, temperature = 0.0, nodeKey = "scan_email"),
+    private val llm: LlmCaller = LlmClient.forIngest(Config.SCAN_MODEL, jsonMode = true, temperature = 0.0, nodeKey = "scan_email"),
     private val mapper: ObjectMapper = ObjectMapper()
 ) : Node<JDState> {
 
@@ -58,6 +58,9 @@ class ScanEmailNode(
             |- remote_policy: "remote" | "hybrid" | "onsite" | "unknown"
             |- yoe_required: integer or null
             |- tech_stack: array of strings
+            |- is_application_update: boolean — interview scheduling/confirmation, assessment invite,
+            |  application status, or offer for a role the candidate already applied to or is
+            |  interviewing for. When true, is_job_posting is false even if the JD is attached.
             |If not a job posting, set is_job_posting to false.
         """.trimMargin()
     }
@@ -70,7 +73,7 @@ class ScanEmailNode(
 
         if (input.isJobPosting) return input
 
-        if (isJobBoardDomain(senderDomain)) {
+        if (isJobBoardDomain(senderDomain) && !BoardRegistry.isRecruiterRelay(senderDomain)) {
             println("[scan_email] Job board email from domain: $senderDomain")
             return processJobBoardEmail(input, senderDomain, email.rawBody)
         }
@@ -82,6 +85,11 @@ class ScanEmailNode(
     private fun processJobBoardEmail(input: JDState, senderDomain: String, emailBody: String): JDState {
         val group = BoardRegistry.groupFor(senderDomain)
         val parsedDigestJobs = parseBoardDigestJobs(input, group?.key)
+        if (parsedDigestJobs.isEmpty() && group?.fallbackToRecruiter == true) {
+            val email = input.emailIntake!!
+            println("[scan_email] $senderDomain mail is not a job alert — reading it as a direct email")
+            return processRecruiterEmail(input, email.subject, email.rawBody, email.htmlBody)
+        }
         if (parsedDigestJobs.isNotEmpty()) {
             val groupLabel = group?.key?.replace('_', ' ') ?: "job board"
             val base = input.withEmailFlags(isDigest = true, isInlineDigest = false).copy(
@@ -132,7 +140,16 @@ class ScanEmailNode(
         }
 
         return try {
-            parseLlmResponse(input, llm.call(prompt))
+            // One retry on an unparseable reply, as in ScrapeJdNode: glm occasionally drops the
+            // opening `{"` of its JSON. A re-ask of the same prompt parses; a JD_Error does not.
+            parseLlmResponse(input, llm.call(prompt)).takeIf { it.error.isEmpty() }
+                ?: run {
+                    println("[scan_email] Unparseable LLM reply — retrying once")
+                    parseLlmResponse(input, llm.call(prompt))
+                }
+        } catch (e: com.jd.pipeline.client.TransientLlmFailure) {
+            println("[scan_email] Transient LLM failure: ${e.message}")
+            throw com.jd.pipeline.client.RetryableLlmError("scan_email: ${e.message}", e)
         } catch (e: Exception) {
             println("[scan_email] LLM error: ${e.message}")
             input.copy(isJobPosting = false, error = "scan_email: ${e.message}")
@@ -211,11 +228,17 @@ class ScanEmailNode(
         val cleaned = responseText.replace(Regex("```(?:json)?"), "").trim()
             .let { if (it.endsWith("`")) it.dropLast(1).trim() else it }
         return try {
-            val node = mapper.readTree(cleaned)
-            val isJobPosting = node.path("is_job_posting").asBoolean(false)
+            // readTree reads one value and ignores the rest, so a reply that lost its opening `{`
+            // can parse as a bare string; with no is_job_posting it would read as "not a job".
+            val node = mapper.readTree(cleaned).also { require(it.isObject) { "not a JSON object" } }
+            // An application update wins over is_job_posting: interview confirmations often attach
+            // the JD, and treating them as recruiter outreach re-tailored the same role every round.
+            val isApplicationUpdate = node.path("is_application_update").asBoolean(false)
+            val isJobPosting = node.path("is_job_posting").asBoolean(false) && !isApplicationUpdate
             val jobUrl = node.path("job_url").asText("").let { if (it == "null") "" else it }
             input.withEmailFlags(isRecruiter = isJobPosting).copy(
                 isJobPosting = isJobPosting,
+                isApplicationUpdate = isApplicationUpdate,
                 jobUrl = jobUrl.ifBlank { input.jobUrl },
                 jdText = node.path("jd_text").asText(""),
                 company = node.path("company").asText("Unknown"),
@@ -224,8 +247,14 @@ class ScanEmailNode(
                 remotePolicy = node.path("remote_policy").asText("unknown"),
                 yoeRequired = node.path("yoe_required").takeIf { !it.isNull && !it.isMissingNode }?.asInt(),
                 techStack = node.path("tech_stack").map { it.asText() },
-                skippedReason = if (!isJobPosting) "Not a job posting" else ""
+                skippedReason = when {
+                    isApplicationUpdate -> "Application update (interview / status) for a role already in progress"
+                    !isJobPosting -> "Not a job posting"
+                    else -> ""
+                }
             )
+        } catch (e: com.jd.pipeline.client.TransientLlmFailure) {
+            throw com.jd.pipeline.client.RetryableLlmError("scan_email: ${e.message}", e)
         } catch (e: Exception) {
             input.copy(isJobPosting = false, error = "scan_email: JSON parse failed — ${cleaned.take(200)}")
         }

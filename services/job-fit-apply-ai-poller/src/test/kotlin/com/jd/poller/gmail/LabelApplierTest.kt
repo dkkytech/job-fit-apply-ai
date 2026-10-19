@@ -64,6 +64,41 @@ class LabelApplierTest {
     }
 
     @Test
+    @DisplayName("JD_Scrape_Failed → label + mark-unread; does not archive")
+    fun scrapeFailed() {
+        val g = gmail()
+        LabelApplier.apply(g, "m-scrape", TerminalLabels.JD_SCRAPE_FAILED)
+
+        verify(g).getOrCreateLabel(TerminalLabels.JD_SCRAPE_FAILED)
+        verify(g).markUnread("m-scrape")
+        verify(g, never()).archiveEmail(any())
+        verify(g).findLabelId(TerminalLabels.JD_ERROR)
+        verify(g).findLabelId(TerminalLabels.PROCESSING)
+    }
+
+    @Test
+    @DisplayName("JD_Application_Update → label + mark-unread; stays in the inbox, not starred")
+    fun applicationUpdate() {
+        val g = gmail()
+        LabelApplier.apply(g, "m-interview", TerminalLabels.APPLICATION_UPDATE)
+
+        verify(g).getOrCreateLabel(TerminalLabels.APPLICATION_UPDATE)
+        verify(g).markUnread("m-interview")
+        verify(g, never()).archiveEmail(any())
+        verify(g, never()).starEmail(any())
+        verify(g).findLabelId(TerminalLabels.JD_ERROR)
+        verify(g).findLabelId(TerminalLabels.PROCESSING)
+    }
+
+    @Test
+    @DisplayName("intake query excludes JD_Application_Update so labelled emails are not re-submitted")
+    fun intakeQueryExcludesApplicationUpdate() {
+        kotlin.test.assertTrue(
+            com.jd.poller.config.PollerConfig.GMAIL_SEARCH_QUERY.contains("-label:JD_Application_Update")
+        )
+    }
+
+    @Test
     @DisplayName("JD_Processed_Digest → label + archive")
     fun digest() {
         val g = gmail()

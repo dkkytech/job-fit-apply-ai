@@ -1,0 +1,7 @@
+{"jobs":[
+ {"id":4011,"title":"Senior SDET","absolute_url":"https://boards.greenhouse.io/acme/jobs/4011",
+  "location":{"name":"New York, NY"},"offices":[{"name":"Seattle","location":"Seattle, WA"},{"name":"New York"}],
+  "content":"&lt;h2&gt;About the role&lt;/h2&gt;&lt;p&gt;Build test automation.&lt;/p&gt;&lt;ul&gt;&lt;li&gt;Kotlin&lt;/li&gt;&lt;li&gt;CI/CD&lt;/li&gt;&lt;/ul&gt;"},
+ {"id":4012,"title":"Account Executive","absolute_url":"https://boards.greenhouse.io/acme/jobs/4012",
+  "location":{"name":"Austin, TX"},"offices":[],"content":""}
+],"meta":{"total":2}}

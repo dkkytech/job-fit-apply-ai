@@ -22,6 +22,11 @@ data class SubmitJobRequest(
     val jobUrl: String? = null,
     val source: String? = "JSEARCH",
     val idempotencyKey: String? = null,
+    val salaryRange: String? = null,
+    val remotePolicy: String? = null,
+    val employmentType: String? = null,
+    val yoeRequired: Int? = null,
+    val techStack: List<String>? = null,
 )
 
 @JsonIgnoreProperties(ignoreUnknown = true)

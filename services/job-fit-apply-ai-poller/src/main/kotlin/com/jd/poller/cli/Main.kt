@@ -7,7 +7,8 @@ import com.jd.poller.health.Heartbeat
 /**
  * Poller entrypoint. Owns ALL Gmail interaction for the system (Phase 1):
  *   --poll            run the intake + write-back loops (the long-running service)
- *   --health          exit 0 if the loops are alive (fresh heartbeat) — container healthcheck
+ *   --health          exit 0 if the loops are alive (fresh heartbeat) and Gmail auth is not
+ *                     known dead — container healthcheck
  *   --reauth          browser-free OAuth: print URL, paste the redirect URL back
  *   --check-token     report token status (exit 0 = VALID)
  *   --token-from-url  headless OAuth: exchange a pasted redirect URL for a token
@@ -18,9 +19,10 @@ object Main {
         when (val cmd = parse(args)) {
             is PollerCommand.Poll -> PollerService().run()
             is PollerCommand.Health -> {
-                if (healthy()) println("[health] ok")
+                val problem = healthProblem()
+                if (problem == null) println("[health] ok")
                 else {
-                    System.err.println("[health] stale/missing heartbeat at ${PollerConfig.HEARTBEAT_FILE}")
+                    System.err.println("[health] $problem")
                     kotlin.system.exitProcess(1)
                 }
             }
@@ -42,9 +44,19 @@ object Main {
         }
     }
 
-    /** Container healthcheck: the loops are alive iff the heartbeat is fresh. */
-    internal fun healthy(now: Long = System.currentTimeMillis()): Boolean =
-        Heartbeat.fromConfig(PollerConfig.HEARTBEAT_FILE).isFresh(PollerConfig.HEALTH_MAX_AGE_MS, now)
+    /** Container healthcheck: healthy iff the heartbeat is fresh and Gmail auth is not known dead. */
+    internal fun healthy(now: Long = System.currentTimeMillis()): Boolean = healthProblem(now = now) == null
+
+    /** Why the poller is unhealthy, or null when it is healthy. */
+    internal fun healthProblem(
+        heartbeat: Heartbeat = Heartbeat.fromConfig(PollerConfig.HEARTBEAT_FILE),
+        maxAgeMs: Long = PollerConfig.HEALTH_MAX_AGE_MS,
+        now: Long = System.currentTimeMillis(),
+    ): String? {
+        heartbeat.authFailure()?.let { return it }
+        if (!heartbeat.isFresh(maxAgeMs, now)) return "stale/missing heartbeat at ${PollerConfig.HEARTBEAT_FILE}"
+        return null
+    }
 
     internal fun parse(args: Array<String>): PollerCommand {
         var i = 0
@@ -81,7 +93,7 @@ object Main {
             Usage: poller <command>
 
               --poll                 Run the intake + write-back loops (long-running service)
-              --health               Exit 0 if the loops are alive (container healthcheck)
+              --health               Exit 0 if the loops are alive and Gmail auth is OK (container healthcheck)
               --reauth               Browser-free OAuth: print URL, paste the redirect URL back
               --check-token          Report Gmail token status (exit 0 = VALID)
               --token-from-url <url> Headless OAuth: exchange a pasted redirect URL for a token

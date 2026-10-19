@@ -1,0 +1,9 @@
+{"total":743,"jobPostings":[],"facets":[
+ {"facetParameter":"remoteType","values":[{"descriptor":"Onsite Job","id":"r1","count":10}]},
+ {"facetParameter":"locationMainGroup","values":[
+   {"facetParameter":"locationCountry","descriptor":"Location Country","values":[{"descriptor":"United States of America","id":"c-us","count":700}]},
+   {"facetParameter":"locations","descriptor":"Locations","values":[
+     {"descriptor":"USA - Everett, WA","id":"loc-everett","count":30},
+     {"descriptor":"USA - Washington, DC","id":"loc-dc","count":5},
+     {"descriptor":"USA - Seattle, WA","id":"loc-seattle","count":14},
+     {"descriptor":"USA - Arlington, VA","id":"loc-arl","count":9}]}]}]}

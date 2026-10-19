@@ -1,0 +1,3 @@
+{"meta":{"totalNumber":2},"jobRequisitions":[
+ {"itemID":"76400324_1","requisitionTitle":"Test Engineer","requisitionLocations":[{"address":{"cityName":"Redmond","countrySubdivisionLevel1":{"codeValue":"WA"}}}]},
+ {"itemID":"76400325_1","requisitionTitle":"Machinist","requisitionLocations":[{"address":{"cityName":"Mason","countrySubdivisionLevel1":{"codeValue":"OH"}}}]}]}

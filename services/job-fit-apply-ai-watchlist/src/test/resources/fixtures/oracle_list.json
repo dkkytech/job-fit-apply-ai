@@ -1,0 +1,4 @@
+{"items":[{"TotalJobsCount":2,"Keyword":"Redmond","requisitionList":[
+ {"Id":"124886","Title":"Advanced Software Engineer - Test Systems","PrimaryLocation":"Redmond, WA, United States","WorkplaceType":"On-site","secondaryLocations":[]},
+ {"Id":"124901","Title":"Program Manager","PrimaryLocation":"Phoenix, AZ, United States","WorkplaceType":"Remote","secondaryLocations":[{"Name":"Redmond, WA, United States"}]}
+]}],"count":1,"hasMore":false}

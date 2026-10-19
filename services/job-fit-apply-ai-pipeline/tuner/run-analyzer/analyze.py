@@ -17,7 +17,6 @@ Later phases layer on: rolling-baseline trend tracking (Phase 2), a deep scoring
 import json
 import os
 import sys
-import time
 from pathlib import Path
 
 from analyzer import audit, detectors, findings_ledger, history, notify, outcomes
@@ -26,7 +25,6 @@ from analyzer.cursor import Cursor
 from analyzer.findings import fingerprint, write_findings
 from analyzer.llm import call_model
 from analyzer.metrics import compute_metrics
-from analyzer.pending import Pending
 from analyzer.sources import join_window, load_run_log
 
 ENV = os.environ
@@ -35,13 +33,13 @@ RUN_LOG = Path(ENV["RUN_LOG"])
 RUN_TS = ENV["RUN_TS"]
 FINDINGS_DIR = Path(ENV["FINDINGS_DIR"])
 CURSOR_FILE = Path(ENV.get("CURSOR_FILE", "state/cursor"))
-PENDING_FILE = Path(ENV.get("PENDING_FILE", "state/pending_since"))
 METRICS_FILE = Path(ENV.get("METRICS_FILE", "state/last_metrics.json"))
 HISTORY_FILE = Path(ENV.get("HISTORY_FILE", "state/metrics_history.jsonl"))
 FINDINGS_LEDGER_FILE = Path(ENV.get("FINDINGS_LEDGER_FILE", "state/findings_ledger.jsonl"))
 AUTOFIX_LEDGER_FILE = Path(ENV.get("LEDGER_FILE", "state/autofix_ledger.jsonl"))
 BASELINE_WINDOW = int(ENV.get("RUN_ANALYZER_BASELINE_WINDOW", "10"))
 RESOLVE_RUNS = int(ENV.get("RUN_ANALYZER_RESOLVE_RUNS", "3"))
+RESOLVE_MIN_JOBS = int(ENV.get("RUN_ANALYZER_RESOLVE_MIN_JOBS", str(outcomes.MIN_RESOLVE_JOBS)))
 SKILL = Path(ENV["SKILL_FILE"]).read_text()
 PROMPT = Path(ENV["PROMPT_FILE"]).read_text()
 MODEL = ENV.get("MODEL", "Qwen3.5-9B-OptiQ-4bit")
@@ -49,11 +47,6 @@ BRIDGE_URL = ENV.get("JD_BRIDGE_URL", "http://127.0.0.1:8765")
 PROCESSOR_LOG_TAIL = ENV.get("PROCESSOR_LOG_TAIL", "")
 
 MAX_RECORDS = 200  # cap tokens for very large windows
-# Accumulate-until-N-or-T cadence gate: only run a real analysis once a meaningful batch
-# has accrued (>= MIN_BATCH new jobs) OR the oldest pending job has waited > MAX_DEFER hours.
-# Decouples window size from arrival rate so a slow day doesn't degrade into per-job analysis.
-MIN_BATCH = int(ENV.get("RUN_ANALYZER_MIN_BATCH", "10"))
-MAX_DEFER_HOURS = float(ENV.get("RUN_ANALYZER_MAX_DEFER_HOURS", "6"))
 CONTEXT_N = int(ENV.get("RUN_ANALYZER_CONTEXT_N", "40"))
 
 
@@ -61,45 +54,27 @@ def assemble_window():
     """Decide whether to analyze now and, if so, build both windows.
 
     Returns (decision, report, since, last_seq, context) where decision is one of
-    "cold" | "empty" | "defer" | "analyze". The cursor is advanced (consumed) ONLY on
-    "analyze"; "defer" leaves it so the same jobs re-accrue until the gate opens.
+    "cold" | "empty" | "analyze". Every non-empty cursor delta is analyzed immediately.
     """
     bridge = BridgeClient(BRIDGE_URL)
     cursor = Cursor(CURSOR_FILE)
-    pending = Pending(PENDING_FILE)
-
     since = cursor.read()
     if since is None:  # cold start — seed at head, skip history
         head = bridge.head_seq()
         cursor.write(head)
-        pending.clear()
         print(f"[analyze] cold start — seeding cursor at head seq {head} (skipping history)")
         return "cold", [], head, head, []
 
-    # Report window = cursor-delta, fetched WITHOUT committing the cursor yet (so we can defer).
+    # Report window = cursor-delta.
     completed, last_seq = bridge.drain(since)
     run_log_by_id = load_run_log(RUN_LOG)
     report = join_window(completed, run_log_by_id)[-MAX_RECORDS:]
 
     if not report:  # nothing new
-        pending.clear()
         return "empty", [], since, since, []
 
-    # Cadence gate. Mark when the first pending job appeared; force a run past MAX_DEFER.
-    now = time.time()
-    first_seen = pending.read()
-    if first_seen is None:
-        pending.write(now)
-        first_seen = now
-    age_h = (now - first_seen) / 3600.0
-    if len(report) < MIN_BATCH and age_h < MAX_DEFER_HOURS:
-        print(f"[analyze] defer — {len(report)} job(s) pending (< {MIN_BATCH}) and only "
-              f"{age_h:.1f}h waited (< {MAX_DEFER_HOURS}h); leaving cursor at {since}")
-        return "defer", report, since, last_seq, []
-
-    # Analyze: consume the report window (advance cursor) and clear the pending marker.
+    # Analyze every non-empty report window and consume it immediately.
     cursor.write(last_seq)
-    pending.clear()
 
     # Rolling context window = last CONTEXT_N completed (already-seen included), read-only —
     # gives metrics/patterns/regressions a stable backdrop even when the report window is small.
@@ -119,8 +94,9 @@ def build_user_prompt(metrics, ctx_metrics, prior, base, recs, context, det_find
         f"RECENT_CONTEXT_METRICS (over the last {len(context)} completed jobs — use these for "
         f"rates, per-board patterns, and regression judgement; the batch may be small):\n{json.dumps(ctx_metrics)}\n\n"
         f"PRIOR_METRICS (immediately previous run):\n{json.dumps(prior)}\n\n"
-        f"ROLLING_BASELINE (median over the last {BASELINE_WINDOW} runs — a metric moving off "
-        f"this median is a regression even if absolute counts look fine):\n{json.dumps(base)}\n\n"
+        f"ROLLING_BASELINE (job-weighted median over the last {BASELINE_WINDOW} runs, so small "
+        f"windows count less — a metric moving off this median is a regression even if absolute "
+        f"counts look fine):\n{json.dumps(base)}\n\n"
         f"RUN_REPORT ({len(recs)} NEW job record(s) this batch, one JSON per line — focus findings here):\n"
         + "\n".join(json.dumps(r) for r in recs)
         + f"\n\nCONTEXT_WINDOW ({len(context)} recent job record(s) for backdrop only, do not re-report old issues):\n"
@@ -132,8 +108,7 @@ def build_user_prompt(metrics, ctx_metrics, prior, base, recs, context, det_find
 def main():
     decision, recs, since, last_seq, context = assemble_window()
 
-    # Cold start, empty window, or deferred batch: nothing to analyze this tick. Exit cheaply —
-    # no LLM call, no findings dir. (The gate keeps the cursor unadvanced on "defer".)
+    # Cold start or empty window: nothing to analyze this tick. Exit cheaply — no LLM call.
     if decision != "analyze":
         if decision in ("cold", "empty"):
             print(f"[analyze] no new completed jobs since seq {since} — nothing to do")
@@ -205,7 +180,7 @@ def main():
         outcomes.reconcile_merges(AUTOFIX_LEDGER_FILE)
         oc = outcomes.check_outcomes(
             findings_ledger.load(FINDINGS_LEDGER_FILE), AUTOFIX_LEDGER_FILE,
-            HISTORY_FILE, k=RESOLVE_RUNS)
+            HISTORY_FILE, k=RESOLVE_RUNS, min_jobs=RESOLVE_MIN_JOBS)
         resolved, regressed = oc["resolved"], oc["regressed"]
         if resolved:
             findings_ledger.mark_resolved(FINDINGS_LEDGER_FILE, resolved, RUN_TS)

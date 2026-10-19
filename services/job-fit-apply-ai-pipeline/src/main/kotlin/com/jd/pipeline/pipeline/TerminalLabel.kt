@@ -13,13 +13,16 @@ import com.jd.pipeline.state.isInlineDigest
  */
 object TerminalLabel {
     const val JD_ERROR            = "JD_Error"
+    const val JD_SCRAPE_FAILED    = "JD_Scrape_Failed"
     const val RECRUITER           = "Recruiter_Response_Required"
     const val JD_PROCESSED_DIGEST = "JD_Processed_Digest"
     const val JD_NOT_FOUND        = "JD_Not_Found"
     const val JD_PROCESSED        = "JD_Processed"
+    const val APPLICATION_UPDATE  = "JD_Application_Update"
 
     fun forState(state: JDState): String = when {
         state.error.isNotEmpty()               -> JD_ERROR
+        state.isApplicationUpdate              -> APPLICATION_UPDATE
         state.isRecruiterResponseRequired      -> RECRUITER
         state.isDigest || state.isInlineDigest -> JD_PROCESSED_DIGEST
         !state.isJobPosting                    -> JD_NOT_FOUND

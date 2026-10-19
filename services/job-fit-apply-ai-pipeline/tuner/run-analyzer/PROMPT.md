@@ -21,7 +21,7 @@ This prompt has two uses:
 1. **Unattended (scheduled):** `tuner/run-analyzer/run_analyzer.sh` drains the jobs completed
    since the cursor, assembles the window inputs, sends this prompt + the skill + `RUN_REPORT`
    to the configured model (`RUN_ANALYZER_MODEL`, default local oMLX), and writes each finding
-   as a task file under `tuner/run-analyzer/findings/<run-ts>/`. Run hourly. A separate daily
+   as a task file under `tuner/run-analyzer/findings/<run-ts>/`. Run hourly. A separate twice-daily
    `run_analyzer.sh --autofix` (opt-in) can turn high findings into a living draft PR.
 
 2. **Interactive (a coding session):** hand this prompt to an agent to analyze the latest

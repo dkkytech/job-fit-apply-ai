@@ -75,4 +75,29 @@ class CompletedEventTest {
         assertEquals(true, s.contains("j5"))
         assertEquals(true, s.contains("Acme"))
     }
+
+    @Test
+    @DisplayName("action fields default to no email, not a recruiter, no label")
+    fun actionFieldDefaults() {
+        val e = CompletedEvent(jobId = "j1")
+        assertNull(e.messageId)
+        assertEquals(false, e.isRecruiter)
+        assertNull(e.terminalLabel)
+    }
+
+    @Test
+    @DisplayName("is_recruiter, message_id and terminal_label map from the bridge's wire names")
+    fun actionFieldsFromWire() {
+        val mapper = com.fasterxml.jackson.databind.ObjectMapper()
+            .registerModule(com.fasterxml.jackson.module.kotlin.KotlinModule.Builder().build())
+            .setPropertyNamingStrategy(com.fasterxml.jackson.databind.PropertyNamingStrategies.SNAKE_CASE)
+            .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+        val e = mapper.readValue(
+            """{"job_id":"j","completed_seq":5,"message_id":"m1","is_recruiter":true,"terminal_label":"Recruiter_Response_Required"}""",
+            CompletedEvent::class.java,
+        )
+        assertEquals("m1", e.messageId)
+        assertEquals(true, e.isRecruiter)
+        assertEquals("Recruiter_Response_Required", e.terminalLabel)
+    }
 }

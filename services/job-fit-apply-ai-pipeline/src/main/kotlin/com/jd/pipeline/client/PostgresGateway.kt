@@ -117,6 +117,24 @@ object PostgresGateway : SupabaseGateway {
         }
     }
 
+    override fun update(table: String, record: Map<String, Any?>, filterCol: String, filterVal: String): JsonNode {
+        requireIdentifier(table)
+        requireIdentifier(filterCol)
+        val cols = record.keys.onEach { requireIdentifier(it) }.toList()
+        require(cols.isNotEmpty()) { "update($table) with no columns" }
+        val sql = "UPDATE $table SET ${cols.joinToString(", ") { "$it = ?" }} WHERE $filterCol = ? RETURNING *"
+
+        return withConnection { conn ->
+            conn.prepareStatement(sql).use { ps ->
+                cols.forEachIndexed { i, col -> bind(conn, ps, i + 1, record[col]) }
+                ps.setString(cols.size + 1, filterVal)
+                ps.executeQuery().use { rs ->
+                    if (rs.next()) rowToJson(rs) else mapper.createObjectNode()
+                }
+            }
+        }
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────
 
     /** Translate a PostgREST filter expr ("eq.value", "gte.value") into (sqlOp, value). */

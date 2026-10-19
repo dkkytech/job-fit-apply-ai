@@ -8,7 +8,7 @@
   Discord/Telegram notifications (each carries the open analyzer PR's URL when one exists).
 
   A shared single-instance lock (/tmp/jd-run-analyzer.lock, held by run_analyzer.sh) guarantees
-  this never overlaps the daily --autofix job.
+  this never overlaps either twice-daily autofix run.
 
   Install (edit ProgramArguments below if your checkout path differs):
     cp scripts/com.jd.run-analyzer.plist ~/Library/LaunchAgents/

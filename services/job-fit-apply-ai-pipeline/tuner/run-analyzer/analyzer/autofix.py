@@ -1,6 +1,6 @@
 """Gated auto-fix -> living draft PR -> notify.
 
-DEFAULT OFF (needs RUN_ANALYZER_AUTOFIX=1). Runs on the slow (daily) cadence, decoupled from
+DEFAULT OFF (needs RUN_ANALYZER_AUTOFIX=1). Runs on the twice-daily cadence, decoupled from
 hourly analysis. Maintains ONE long-lived draft PR that accumulates fixes rather than opening a
 new PR each run. Never merges, never touches main, drafts only.
 

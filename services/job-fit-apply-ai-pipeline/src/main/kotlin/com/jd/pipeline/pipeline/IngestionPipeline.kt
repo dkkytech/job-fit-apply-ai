@@ -36,6 +36,9 @@ class IngestionPipeline {
                 val processed = digestJobs
                     .filter { it.isJobPosting }
                     .map { child ->
+                        // A link-only child (employer alert) is scraped later, at its own claim,
+                        // and only if the bridge doesn't already have the posting.
+                        if (child.submitAsUrl) return@map child
                         var c = scrapeNode.process(child)
                         c = saveNode.process(c)
                         c
@@ -49,9 +52,31 @@ class IngestionPipeline {
             return saveNode.process(current)
         }
 
-        current = scrapeNode.process(current)
+        current = withEmailJdFallback(current, scrapeNode.process(current))
         current = saveNode.process(current)
         return current
+    }
+
+    /**
+     * A recruiter email that already carries the JD only links a page to enrich it, so a failed
+     * scrape of that link (Steel down, a sign-in wall, a mail-merge "respond" page) must not fail
+     * the email. Before this, every such failure became JD_Error even with a full JD in hand.
+     * Below [MIN_EMAIL_JD_CHARS] the email holds a blurb, not a JD, and the scrape error stands.
+     */
+    internal fun withEmailJdFallback(beforeScrape: JDState, scraped: JDState): JDState {
+        if (scraped.error.isEmpty() || beforeScrape.jdText.length < MIN_EMAIL_JD_CHARS) return scraped
+        println(
+            "[ingestion] Scrape of ${beforeScrape.jobUrl} failed (${scraped.error.lineSequence().first().take(160)}) " +
+                "— using the JD from the email body (${beforeScrape.jdText.length} chars)",
+        )
+        // A job_url the scan could not make a URL of ("N/A", prose) would still classify the email
+        // MALFORMED_URL (JD_Scrape_Failed) after the error is cleared; it carries nothing to keep.
+        return scraped.copy(error = "", jobUrl = scraped.jobUrl.takeIf { ScrapeOutcome.isHttpUrl(it) } ?: "")
+    }
+
+    companion object {
+        /** The JD text an email body must already hold for a failed scrape to fall back to it. */
+        const val MIN_EMAIL_JD_CHARS = 500
     }
 
     /**

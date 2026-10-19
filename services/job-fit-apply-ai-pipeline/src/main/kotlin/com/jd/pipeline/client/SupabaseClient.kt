@@ -29,6 +29,11 @@ interface SupabaseGateway {
         limit: Int = 10
     ): List<JsonNode>
     fun delete(table: String, filterCol: String, filterVal: String)
+    /**
+     * Set [record]'s columns on the rows where [filterCol] equals [filterVal]; returns the first
+     * updated row, or an empty object when nothing matched.
+     */
+    fun update(table: String, record: Map<String, Any?>, filterCol: String, filterVal: String): JsonNode
 }
 
 /**
@@ -145,6 +150,21 @@ object SupabaseClient : SupabaseGateway {
 
         val response = http.send(request, HttpResponse.BodyHandlers.ofString())
         checkStatus(response, "DELETE $table")
+    }
+
+    override fun update(table: String, record: Map<String, Any?>, filterCol: String, filterVal: String): JsonNode {
+        val encoded = URLEncoder.encode(filterVal, "UTF-8")
+        val request = HttpRequest.newBuilder()
+            .uri(URI.create("${Config.SUPABASE_PROJECT_URL}/rest/v1/$table?$filterCol=eq.$encoded"))
+            .headers(*authHeaders())
+            .header("Prefer", "return=representation")
+            .method("PATCH", HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(record)))
+            .build()
+
+        val response = http.send(request, HttpResponse.BodyHandlers.ofString())
+        checkStatus(response, "PATCH $table")
+        val rows = mapper.readTree(response.body())
+        return if (rows.isArray && rows.size() > 0) rows[0] else mapper.createObjectNode()
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

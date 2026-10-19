@@ -29,6 +29,31 @@ class BridgeClientClaimTest {
     }
 
     @Test
+    fun `JD_SCRAPED claim from the watchlist parses with source CAREER_SITE`() {
+        val dto = parseClaimTree(mapper.readTree(
+            """{"job_id":"j2","type":"JD_SCRAPED","jd_record":
+               {"jd_text":"hello","company":"Costco IT","role_title":"Quality Engineer","location":"Issaquah, WA",
+                "job_url":"https://example.com/1","source":"CAREER_SITE","idempotency_key":"watchlist:rss:phf.tbe.taleo.net:10965"}}"""
+        ))
+        assertEquals(com.jd.pipeline.source.IngestionSource.CAREER_SITE, dto.jdRecord!!.source)
+        assertEquals("watchlist:rss:phf.tbe.taleo.net:10965", dto.jdRecord!!.idempotencyKey)
+    }
+
+    @Test
+    fun `JD_URL claim parses a ClaimedUrl (snake_case) with its hints`() {
+        val dto = parseClaimTree(mapper.readTree(
+            """{"job_id":"j3","type":"JD_URL","jd_record":
+               {"url":"https://jobs.acme.example/qa/7","source":"EMAIL","company":"Acme","role_title":"SDET","location":"Seattle, WA","idempotency_key":"alert:acme:7"}}"""
+        ))
+        assertEquals(WorkItemType.JD_URL, dto.type)
+        assertNull(dto.jdRecord, "a JD_URL payload is not a JdRecord")
+        val url = dto.url!!
+        assertEquals("https://jobs.acme.example/qa/7", url.url)
+        assertEquals("SDET", url.roleTitle)
+        assertEquals("alert:acme:7", url.idempotencyKey)
+    }
+
+    @Test
     fun `EMAIL_RAW claim parses a ClaimedEmail (snake_case)`() {
         val dto = parseClaimTree(mapper.readTree(
             """{"job_id":"j2","type":"EMAIL_RAW","jd_record":

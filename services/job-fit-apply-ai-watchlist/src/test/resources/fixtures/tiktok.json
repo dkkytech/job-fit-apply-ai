@@ -1,0 +1,3 @@
+{"code":0,"message":"ok","data":{"count":2,"job_post_list":[
+ {"id":"7668837276597127477","title":"Software Engineer in Test - E-Commerce Quality","city_info":{"en_name":"Seattle"},"description":"Build AI test automation.","requirement":"3+ years of Python."},
+ {"id":"7668837276597127478","title":"QA Engineer","city_info":{"en_name":"Seattle"},"description":"Manual and automated testing.","requirement":""}]}}

@@ -14,9 +14,12 @@ import org.mockito.kotlin.never
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
+import java.io.IOException
+import java.io.InterruptedIOException
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -178,6 +181,35 @@ class SteelBrowserTest {
     }
 
     @Test
+    @DisplayName("a createSession transport reset is retried in-scrape with bounded backoff")
+    fun createSessionTransportResetRetriesWithBackoff() {
+        // This is the production path: Java HttpClient can reset while POSTing createSession and
+        // surface IOException("header parser received no bytes") before Playwright is involved.
+        val client = mock<SteelClient>()
+        val session = SteelClient.SteelSession(id = "s1", websocketUrl = "ws://localhost:3000/")
+        whenever(client.createSession(anyOrNull(), any()))
+            .thenAnswer { throw IOException("HTTP/1.1 header parser received no bytes") }
+            .thenReturn(session)
+        val handle = mock<Browser>()
+        whenever(handle.isConnected).thenReturn(true)
+        val backoffs = mutableListOf<Long>()
+        val browser = SteelBrowser(
+            baseUrl = "http://steel:3000",
+            connectMaxAttempts = 3,
+            connectBackoffBaseMs = 500,
+            client = client,
+            store = mock(),
+            nanoTime = { 0L },
+            sleep = { backoffs.add(it) },
+            connect = { mock<Playwright>() to handle },
+        )
+
+        assertTrue(browser.isAvailable())
+        verify(client, times(2)).createSession(anyOrNull(), any())
+        assertEquals(listOf(500L), backoffs)
+    }
+
+    @Test
     @DisplayName("a createSession timeout is NOT retried in-scrape — it gives up after one attempt")
     fun connectTimeoutIsNotRetried() {
         // Bound the amplification: createSession has a 90s HTTP timeout, so retrying a *hung* backend
@@ -204,6 +236,27 @@ class SteelBrowserTest {
         assertFalse(browser.isAvailable())
         verify(client, times(1)).createSession(anyOrNull(), any())  // no in-scrape retry on a timeout
         assertTrue(backoffs.isEmpty())                              // and therefore no backoff sleep
+    }
+
+    @Test
+    @DisplayName("an interrupted I/O createSession failure is not retried in-scrape")
+    fun interruptedIoIsNotRetried() {
+        val client = mock<SteelClient>()
+        whenever(client.createSession(anyOrNull(), any()))
+            .thenAnswer { throw InterruptedIOException("request cancelled") }
+        val backoffs = mutableListOf<Long>()
+        val browser = SteelBrowser(
+            baseUrl = "http://steel:3000",
+            connectMaxAttempts = 3,
+            client = client,
+            store = mock(),
+            nanoTime = { 0L },
+            sleep = { backoffs.add(it) },
+        )
+
+        assertFalse(browser.isAvailable())
+        verify(client, times(1)).createSession(anyOrNull(), any())
+        assertTrue(backoffs.isEmpty(), "cancellation-shaped I/O must not enter retry backoff")
     }
 
     @Test
@@ -285,7 +338,13 @@ class SteelBrowserTest {
      * [failFirst] attempts (a Steel session that died under a still-"connected" Browser handle),
      * then succeeds. Returns the browser, the page it eventually hands out, and a call counter.
      */
-    private class TargetClosedFixture(failFirst: Int, error: PlaywrightException) {
+    private class TargetClosedFixture(
+        failFirst: Int,
+        error: PlaywrightException,
+        targetClosedMaxRetries: Int = 2,
+        connectBackoffBaseMs: Long = 500,
+        sleep: (Long) -> Unit = {},
+    ) {
         val client = mock<SteelClient>()
         val page = mock<Page>()
         var newPageCalls = 0
@@ -307,7 +366,9 @@ class SteelBrowserTest {
                 client = client,
                 store = mock(),
                 nanoTime = { 0L },
-                sleep = {},
+                targetClosedMaxRetries = targetClosedMaxRetries,
+                connectBackoffBaseMs = connectBackoffBaseMs,
+                sleep = sleep,
                 connect = { mock<Playwright>() to handle },
             )
         }
@@ -337,6 +398,89 @@ class SteelBrowserTest {
         assertTrue(thrown.message!!.contains("Target closed"))
         assertEquals(3, fx.newPageCalls)                             // 1 + 2 retries, then give up
         verify(fx.client, times(3)).createSession(anyOrNull(), any())
+    }
+
+    @Test
+    @DisplayName("pageForDomain retries a session transport reset with a fresh session")
+    fun transportResetRetriesWithNewSession() {
+        // A dead CDP socket can surface as the JDK HTTP parser's "received no bytes" message rather
+        // than Playwright's TargetClosedError. It is the same stale-session condition, so recover it.
+        val fx = TargetClosedFixture(
+            failFirst = 1,
+            error = PlaywrightException("HTTP/1.1 header parser received no bytes"),
+        )
+
+        assertEquals(fx.page, fx.browser.pageForDomain("jobleads.com"))
+        assertEquals(2, fx.newPageCalls)
+        verify(fx.client, times(2)).createSession(anyOrNull(), any())
+    }
+
+    @Test
+    @DisplayName("dead-session retries use bounded exponential backoff")
+    fun deadSessionRetriesUseBoundedBackoff() {
+        val backoffs = mutableListOf<Long>()
+        val fx = TargetClosedFixture(
+            failFirst = 2,
+            error = PlaywrightException("HTTP/1.1 header parser received no bytes"),
+            connectBackoffBaseMs = 100,
+            sleep = { backoffs.add(it) },
+        )
+
+        assertEquals(fx.page, fx.browser.pageForDomain("jobleads.com"))
+        assertEquals(listOf(100L, 200L), backoffs)
+    }
+
+    @Test
+    @DisplayName("an interrupted dead-session backoff restores interrupt and preserves the original scrape error")
+    fun interruptedDeadSessionBackoffStopsAndPreservesOriginalError() {
+        val original = PlaywrightException("HTTP/1.1 header parser received no bytes")
+        val fx = TargetClosedFixture(
+            failFirst = 99,
+            error = original,
+            sleep = { throw InterruptedException("cancel retry") },
+        )
+
+        try {
+            val thrown = assertFailsWith<PlaywrightException> { fx.browser.pageForDomain("jobleads.com") }
+            assertSame(original, thrown)
+            assertTrue(Thread.currentThread().isInterrupted)
+            assertEquals(1, fx.newPageCalls, "interruption must stop before another fresh session")
+            verify(fx.client, times(1)).createSession(anyOrNull(), any())
+        } finally {
+            Thread.interrupted() // do not leak the deliberate cancellation into the shared test worker
+        }
+    }
+
+    @Test
+    @DisplayName("dead-session retry verifies availability before navigating and preserves the scrape error")
+    fun deadSessionRetryChecksAvailabilityAndPreservesOriginalError() {
+        val client = mock<SteelClient>()
+        val session = SteelClient.SteelSession(id = "s1", websocketUrl = "ws://localhost:3000/")
+        whenever(client.createSession(anyOrNull(), any()))
+            .thenReturn(session)
+            .thenThrow(RuntimeException("Steel unavailable during retry"))
+        val original = PlaywrightException("HTTP/1.1 header parser received no bytes")
+        val handle = mock<Browser>()
+        whenever(handle.isConnected).thenReturn(true)
+        val context = mock<BrowserContext>()
+        whenever(handle.contexts()).thenReturn(listOf(context))
+        whenever(context.newPage()).thenThrow(original)
+        val backoffs = mutableListOf<Long>()
+        val browser = SteelBrowser(
+            baseUrl = "http://steel:3000",
+            connectBackoffBaseMs = 100,
+            client = client,
+            store = mock(),
+            nanoTime = { 0L },
+            sleep = { backoffs.add(it) },
+            connect = { mock<Playwright>() to handle },
+        )
+
+        val thrown = assertFailsWith<PlaywrightException> { browser.pageForDomain("jobleads.com") }
+        assertSame(original, thrown)
+        verify(client, times(2)).createSession(anyOrNull(), any())
+        verify(context, times(1)).newPage() // unavailable retry never starts a second navigation
+        assertEquals(listOf(100L), backoffs)
     }
 
     @Test
@@ -394,6 +538,23 @@ class SteelBrowserTest {
         assertEquals("scraped:true", result)
         assertEquals(2, blockCalls)                                    // block re-run on a fresh tab
         verify(fx.client, times(2)).createSession(anyOrNull(), any())  // on a brand-new session
+    }
+
+    @Test
+    @DisplayName("withPageForDomain retries a transport reset that occurs mid-scrape")
+    fun withPageForDomainRetriesMidScrapeTransportReset() {
+        val fx = TargetClosedFixture(failFirst = 0, error = PlaywrightException("unused"))
+        var blockCalls = 0
+
+        val result = fx.browser.withPageForDomain("jobleads.com") {
+            blockCalls++
+            if (blockCalls == 1) throw PlaywrightException("CDP ECONNRESET while reading page")
+            "recovered"
+        }
+
+        assertEquals("recovered", result)
+        assertEquals(2, blockCalls)
+        verify(fx.client, times(2)).createSession(anyOrNull(), any())
     }
 
     @Test

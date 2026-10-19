@@ -9,10 +9,12 @@ import com.jd.pipeline.client.LlmClient
 import com.jd.pipeline.client.SigninServer
 import com.jd.pipeline.config.Config
 import com.jd.pipeline.state.JDState
+import com.jd.pipeline.utils.ExpiringHostSet
 import com.microsoft.playwright.Page
 import com.microsoft.playwright.options.LoadState
 import com.microsoft.playwright.options.WaitForSelectorState
 import com.microsoft.playwright.options.WaitUntilState
+import com.jd.pipeline.utils.UrlSafety
 import org.jsoup.Jsoup
 import java.net.URI
 import java.net.http.HttpClient
@@ -30,12 +32,18 @@ import java.util.regex.Pattern
  * Jackson replaces all regex JSON parsing.
  */
 class ScrapeJdNode(
-    private val llm: LlmCaller = LlmClient.fromModelString(Config.SCRAPE_MODEL, jsonMode = true, temperature = 0.0, nodeKey = "scrape_jd"),
+    private val llm: LlmCaller = LlmClient.forIngest(Config.SCRAPE_MODEL, jsonMode = true, temperature = 0.0, nodeKey = "scrape_jd"),
     // Long-lived Chrome connected over CDP (one tab per domain, warm session). The ONLY browser
     // path — when the endpoint is unreachable, browser-needing scrapes fail cleanly with an alert
     // (plain-HTTP scraping is unaffected). No in-process Chromium is ever launched.
     private val cdpBrowser: CdpBrowser = BrowserFactory.create(),
     private val alerts: AlertService = AlertService(),
+    domainSkipTtlMs: Long = Config.SCRAPE_DOMAIN_SKIP_TTL_MS,
+    // Monotonic clock seam (nanos) for the skip lists' expiry.
+    nanoTime: () -> Long = System::nanoTime,
+    // SSRF guard (see UrlSafety). Seams so tests need neither DNS nor a real private host.
+    private val allowPrivateHosts: Boolean = Config.SCRAPE_ALLOW_PRIVATE_HOSTS,
+    private val isPrivateTarget: (String) -> Boolean = { UrlSafety.isPrivateTarget(it) },
 ) : Node<JDState> {
 
     /** Set to false to suppress verbose progress logging (e.g. during tuner runs). */
@@ -44,16 +52,14 @@ class ScrapeJdNode(
     private fun log(msg: String) { if (verbose) println(msg) }
 
     // ── Batch-level state ────────────────────────────────────────────────────
-    // Tracks domains that blocked this batch so we don't hammer them repeatedly.
-    // The same ScrapeJdNode instance is reused across all jobs in a single pipeline
-    // invocation — one attempt per domain, then skip with a clear reason.
-    val batchBlockedDomains: MutableSet<String> = mutableSetOf()
-    // Hosts that hit an auth wall (login/challenge) via a CDP scrape this batch — skipped on
-    // re-attempt, and each fires one phone re-auth alert. Generalizes the old LinkedIn-only flag so
-    // every authenticated CDP-scraped board (Glassdoor, Jobright, …) gets the same treatment.
-    val batchAuthExpiredDomains: MutableSet<String> = mutableSetOf()
-    // Fire the "debug Chrome unreachable" alert at most once per batch.
-    var batchCdpUnavailableAlerted: Boolean = false
+    // Sites that blocked us as a whole (403 / 429 / bot check), so we don't hammer them. One instance
+    // lives for the Processor's whole run and nothing resets it between emails, so entries lapse after
+    // [domainSkipTtlMs] — before that, one block skipped the site until the next restart.
+    val batchBlockedDomains: MutableSet<String> = ExpiringHostSet(domainSkipTtlMs, nanoTime)
+    // Hosts that hit an auth wall (login/challenge) via a CDP scrape — skipped until the entry lapses,
+    // and each fires a phone re-auth alert (repeat-limited by AlertService). Generalizes the old
+    // LinkedIn-only flag so every authenticated CDP-scraped board (Glassdoor, Jobright, …) is covered.
+    val batchAuthExpiredDomains: MutableSet<String> = ExpiringHostSet(domainSkipTtlMs, nanoTime)
 
     /** Back-compat accessor for the LinkedIn-specific console warning (see CliOutput). */
     val batchLinkedInSessionExpired: Boolean
@@ -62,7 +68,6 @@ class ScrapeJdNode(
     fun resetBatch() {
         batchBlockedDomains.clear()
         batchAuthExpiredDomains.clear()
-        batchCdpUnavailableAlerted = false
     }
 
     /** True if [host] already hit an auth wall this batch (exact or parent-domain match). */
@@ -74,14 +79,26 @@ class ScrapeJdNode(
 
     private val mapper = ObjectMapper()
 
-    // Page-fetching HttpClient — separate from LlmClient; needs followRedirects.
+    // Page-fetching HttpClient — separate from LlmClient. Redirects are followed by hand
+    // (sendFollowingRedirects) so every hop passes the private-network check *before* it is requested.
     private val httpClient = HttpClient.newBuilder()
-        .followRedirects(HttpClient.Redirect.NORMAL)
+        .followRedirects(HttpClient.Redirect.NEVER)
         .build()
 
-    data class PageContent(val rawHtml: String, val cleanedText: String, val blockReason: String = "", val isCaptchaBlock: Boolean = false, val isBotBlock: Boolean = false, val scrapePath: String = "")
+    data class PageContent(val rawHtml: String, val cleanedText: String, val blockReason: String = "", val isCaptchaBlock: Boolean = false, val isBotBlock: Boolean = false, val scrapePath: String = "", val isRateLimited: Boolean = false) {
+        /**
+         * Whether the block is about the whole site (bot wall, CAPTCHA, rate limit) rather than this
+         * one URL (404 for an expired posting, a redirect to search results). Only a site-wide block
+         * skips the site's other jobs — one dead Dice link used to take every Dice job down with it.
+         */
+        val blocksDomain: Boolean get() = isBotBlock || isCaptchaBlock || isRateLimited
+    }
 
     companion object {
+        internal const val PRIVATE_TARGET_REASON = "private network address — not fetched"
+        private const val MAX_REDIRECTS = 5
+        private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
+
         // Site-agnostic auth-wall markers (see detectAuthWall). URL redirects to these paths are the
         // strongest signal a CDP-scraped page bounced us to login/verification instead of the JD.
         private val LOGIN_URL_MARKERS = listOf(
@@ -157,7 +174,7 @@ class ScrapeJdNode(
 
             if (page.blockReason.isNotEmpty()) {
                 log("[scrape_jd] Blocked for $jobUrl: ${page.blockReason}")
-                batchBlockedDomains.add(host)
+                if (page.blocksDomain) batchBlockedDomains.add(host)
                 return input.copy(error = "scrape_jd: ${page.blockReason}", scrapePath = "blocked")
             }
 
@@ -166,7 +183,7 @@ class ScrapeJdNode(
                 return input.copy(error = "scrape_jd: empty page content", scrapePath = "empty")
             }
 
-            parseJobPage(input, jobUrl, page.cleanedText)
+            parseJobPage(input, jobUrl, page.cleanedText, page.rawHtml)
                 .copy(rawPageContent = page.rawHtml, scrapePath = page.scrapePath)
         } catch (e: Exception) {
             log("[scrape_jd] Error fetching $jobUrl: ${e.message}")
@@ -187,6 +204,10 @@ class ScrapeJdNode(
     }
 
     private fun fetchPage(url: String): PageContent {
+        if (!allowPrivateHosts && isPrivateTarget(url)) {
+            log("[scrape_jd] Refusing private-network target: $url")
+            return PageContent(rawHtml = "", cleanedText = "", blockReason = PRIVATE_TARGET_REASON, scrapePath = "blocked")
+        }
         val host = extractHost(url)
         if (isAuthExpired(host)) {
             log("[scrape_jd] Auth wall pending for $host — skipping browser fetch this batch")
@@ -218,18 +239,42 @@ class ScrapeJdNode(
         return httpResult.copy(scrapePath = "http")
     }
 
+    private fun pageRequest(uri: URI): HttpRequest = HttpRequest.newBuilder()
+        .uri(uri)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .timeout(java.time.Duration.ofSeconds(20))
+        .GET()
+        .build()
+
+    /**
+     * GET [start], following up to [MAX_REDIRECTS] redirects the way Redirect.NORMAL would (never
+     * HTTPS → HTTP), but checking each `Location` against the private-network guard *before*
+     * requesting it — so an open redirect on a public site can't make us send a request inward.
+     * Null when a hop is refused. The returned response's uri() is the final URL, as before.
+     */
+    private fun sendFollowingRedirects(start: URI): HttpResponse<String>? {
+        var current = start
+        repeat(MAX_REDIRECTS + 1) {
+            val response = httpClient.send(pageRequest(current), HttpResponse.BodyHandlers.ofString())
+            if (response.statusCode() !in REDIRECT_CODES) return response
+            val location = response.headers().firstValue("Location").orElse(null) ?: return response
+            val next = current.resolve(location.trim())
+            if (current.scheme.equals("https", true) && next.scheme.equals("http", true)) return response
+            if (!allowPrivateHosts && isPrivateTarget(next.toString())) {
+                log("[scrape_jd] Redirect to a private-network target refused: $current → $next")
+                return null
+            }
+            current = next
+        }
+        throw java.io.IOException("too many redirects (> $MAX_REDIRECTS) from $start")
+    }
+
     private fun fetchPageOverHttp(url: String): PageContent {
         try {
-            val request = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                .header("Accept-Language", "en-US,en;q=0.9")
-                .timeout(java.time.Duration.ofSeconds(20))
-                .GET()
-                .build()
-
-            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+            val response = sendFollowingRedirects(URI.create(url))
+                ?: return PageContent("", "", PRIVATE_TARGET_REASON)
             val status = response.statusCode()
 
             // Track the final URL after redirect chain
@@ -244,7 +289,7 @@ class ScrapeJdNode(
                 }
                 429 -> {
                     log("[scrape_jd] HTTP 429 (rate-limited) for $url")
-                    return PageContent("", "", "HTTP 429 — rate-limited")
+                    return PageContent("", "", "HTTP 429 — rate-limited", isRateLimited = true)
                 }
                 503 -> {
                     val body = response.body()
@@ -329,7 +374,7 @@ class ScrapeJdNode(
      * Returns a human-readable block reason if the HTML looks like a CAPTCHA or bot-check page,
      * or null if the page appears normal.
      */
-    private fun detectCaptchaInHtml(html: String): String? {
+    internal fun detectCaptchaInHtml(html: String): String? {
         if (html.isBlank()) return null
         val lower = html.lowercase()
 
@@ -339,6 +384,13 @@ class ScrapeJdNode(
             lower.contains("checking your browser") ||
             lower.contains("please wait while we check your browser")) {
             return "Cloudflare browser challenge"
+        }
+
+        // DataDome challenge (Monster). Match the CAPTCHA page only: normal Monster pages also load
+        // DataDome's tag script and an auto-passing `/interstitial/` frame from the same domain.
+        if ((lower.contains("geo.captcha-delivery.com/captcha") || lower.contains("title=\"datadome captcha\"")) &&
+            Jsoup.parse(html).text().length < AUTH_WALL_MAX_BODY_CHARS) {
+            return "DataDome CAPTCHA"
         }
 
         // Generic CAPTCHA widget markers
@@ -434,8 +486,8 @@ class ScrapeJdNode(
     /** Fire the "browser backend unreachable" alert once per batch, only when a backend is configured. */
     private fun alertCdpUnavailable() {
         val endpoint = activeBackendEndpoint()
-        if (endpoint.isNotBlank() && !batchCdpUnavailableAlerted) {
-            batchCdpUnavailableAlerted = true
+        // AlertService repeat-limits this (dedup key "cdp-down"), so no per-run flag is needed.
+        if (endpoint.isNotBlank()) {
             alerts.chromeDebugUnavailable(endpoint)
         }
     }
@@ -550,11 +602,23 @@ class ScrapeJdNode(
         for (selector in selectors) {
             val text = runCatching { page.locator(selector).first().innerText().trim() }.getOrDefault("")
             if (text.length > 200) {
-                return text
+                // The description selectors are the pre-2026 DOM; the current one uses hashed class
+                // names, so we usually land on `main`. That also holds the top card (work model,
+                // employment type), which we want, and "More jobs", which lists other postings'
+                // salaries and work models the LLM would otherwise attribute to this one.
+                return if (selector == "main" || selector == "body") trimLinkedInRecommendations(text) else text
             }
         }
 
         return ""
+    }
+
+    /** Cut LinkedIn page text at the first "other jobs" section heading, if any. */
+    internal fun trimLinkedInRecommendations(text: String): String {
+        val markers = setOf("more jobs", "similar jobs", "people also viewed", "jobs you may be interested in")
+        val lines = text.lines()
+        val cut = lines.indexOfFirst { it.trim().lowercase() in markers }
+        return if (cut > 0) lines.take(cut).joinToString("\n").trim() else text
     }
 
     private fun buildPageContent(rawHtml: String, preferredVisibleText: String? = null): PageContent {
@@ -590,6 +654,22 @@ class ScrapeJdNode(
     }
 
     /**
+     * Report fields read straight from a schema.org `JobPosting`. Deterministic, so they win over
+     * the LLM's reading of the same page (see [keepStructuredFields]). Empty string / null = absent.
+     */
+    data class JobPostingFacts(
+        val title: String = "",
+        val company: String = "",
+        val location: String = "",
+        val remotePolicy: String = "",
+        val salaryRange: String = "",
+        val employmentType: String = "",
+        val yoeRequired: Int? = null,
+        val skills: List<String> = emptyList(),
+        val description: String = "",
+    )
+
+    /**
      * Extract a schema.org `JobPosting` from `application/ld+json` script blocks and
      * render it as a clean, labeled text block (title, company, location, salary,
      * employment type, full description). Returns null when no usable JobPosting with
@@ -598,6 +678,26 @@ class ScrapeJdNode(
     internal fun extractJobPostingJsonLd(html: String): String? = extractJobPostingJsonLd(Jsoup.parse(html))
 
     internal fun extractJobPostingJsonLd(document: org.jsoup.nodes.Document): String? {
+        val facts = parseJobPostingFacts(document) ?: return null
+        return buildString {
+            appendLine("STRUCTURED_JOB_DATA (authoritative — prefer over visible text):")
+            if (facts.title.isNotBlank()) appendLine("Title: ${facts.title}")
+            if (facts.company.isNotBlank()) appendLine("Company: ${facts.company}")
+            if (facts.location.isNotBlank()) appendLine("Location: ${facts.location}")
+            if (facts.remotePolicy.isNotBlank()) appendLine("Work model: ${facts.remotePolicy}")
+            if (facts.salaryRange.isNotBlank()) appendLine("Salary: ${facts.salaryRange}")
+            if (facts.employmentType.isNotBlank()) appendLine("Employment type: ${facts.employmentType}")
+            facts.yoeRequired?.let { appendLine("Years of experience required: $it") }
+            if (facts.skills.isNotEmpty()) appendLine("Skills: ${facts.skills.joinToString(", ")}")
+            appendLine("Description: ${facts.description}")
+        }.trim()
+    }
+
+    internal fun parseJobPostingFacts(html: String): JobPostingFacts? =
+        if (html.isBlank()) null else parseJobPostingFacts(Jsoup.parse(html))
+
+    /** The first JobPosting with a substantive (>= 100 char) description, or null. */
+    internal fun parseJobPostingFacts(document: org.jsoup.nodes.Document): JobPostingFacts? {
         for (script in document.select("script[type=application/ld+json]")) {
             val json = script.data().trim()
             if (json.isBlank()) continue
@@ -610,8 +710,6 @@ class ScrapeJdNode(
             val descText = Jsoup.parse(descHtml).text().replace(Regex("\\s+"), " ").trim()
             if (descText.length < 100) continue  // too thin to be a real JD body
 
-            val title = posting.path("title").asText("").trim()
-            val company = posting.path("hiringOrganization").path("name").asText("").trim()
             val loc = posting.path("jobLocation").let { jl ->
                 val addr = (if (jl.isArray) jl.firstOrNull() else jl)?.path("address")
                 listOfNotNull(
@@ -619,30 +717,97 @@ class ScrapeJdNode(
                     addr?.path("addressRegion")?.asText("")?.takeIf { it.isNotBlank() },
                 ).joinToString(", ")
             }
-            val salary = posting.path("baseSalary").path("value").let { v ->
-                val min = v.path("minValue").asText(""); val max = v.path("maxValue").asText("")
-                val unit = v.path("unitText").asText("")
-                when {
-                    min.isNotBlank() && max.isNotBlank() -> "$min - $max ${unit}".trim()
-                    min.isNotBlank() -> "$min ${unit}".trim()
-                    else -> ""
-                }
-            }
             val employmentType = posting.path("employmentType").let {
-                if (it.isArray) it.joinToString(", ") { e -> e.asText() } else it.asText("")
+                if (it.isArray) it.firstOrNull()?.asText("").orEmpty() else it.asText("")
             }.trim()
+            // schema.org's only remote signal. Hybrid/onsite aren't expressible, so absence means "unknown".
+            val remote = posting.path("jobLocationType").let {
+                if (it.isArray) it.map { e -> e.asText() } else listOf(it.asText(""))
+            }.any { it.equals("TELECOMMUTE", ignoreCase = true) }
 
-            return buildString {
-                appendLine("STRUCTURED_JOB_DATA (authoritative — prefer over visible text):")
-                if (title.isNotBlank()) appendLine("Title: $title")
-                if (company.isNotBlank()) appendLine("Company: $company")
-                if (loc.isNotBlank()) appendLine("Location: $loc")
-                if (salary.isNotBlank()) appendLine("Salary: $salary")
-                if (employmentType.isNotBlank()) appendLine("Employment type: $employmentType")
-                appendLine("Description: $descText")
-            }.trim()
+            return JobPostingFacts(
+                title = posting.path("title").asText("").trim(),
+                company = posting.path("hiringOrganization").path("name").asText("").trim(),
+                location = loc,
+                remotePolicy = if (remote) "remote" else "",
+                salaryRange = formatJsonLdSalary(posting.path("baseSalary")),
+                employmentType = if (employmentType.isNotBlank()) normalizeEmploymentType(employmentType) else "",
+                yoeRequired = jsonLdYearsOfExperience(posting.path("experienceRequirements")),
+                skills = jsonLdSkills(posting.path("skills")),
+                description = descText,
+            )
         }
         return null
+    }
+
+    /**
+     * `baseSalary` comes in two shapes: the spec's `{value: {minValue, maxValue, unitText}}` (Built In,
+     * Indeed, Greenhouse) and a flattened `{minValue, maxValue}` (Dice). `value` may also be a bare
+     * number. Renders "$121K - $219K/yr" or "$55 - $65/hr"; with no unit, sub-1000 amounts are hourly.
+     */
+    internal fun formatJsonLdSalary(baseSalary: com.fasterxml.jackson.databind.JsonNode): String {
+        if (baseSalary.isMissingNode || baseSalary.isNull) return ""
+        val value = baseSalary.path("value")
+        val holder = if (value.isObject) value else baseSalary
+        fun num(n: com.fasterxml.jackson.databind.JsonNode): Double? =
+            (if (n.isNumber) n.asDouble() else n.asText("").replace(",", "").toDoubleOrNull())?.takeIf { it > 0 }
+        val min = num(holder.path("minValue")) ?: if (value.isValueNode) num(value) else num(holder.path("value"))
+        val max = num(holder.path("maxValue"))
+        if (min == null && max == null) return ""
+        val unit = holder.path("unitText").asText("").ifBlank { baseSalary.path("unitText").asText("") }.uppercase()
+        val suffix = when (unit) {
+            "YEAR" -> "/yr"
+            "HOUR" -> "/hr"
+            "MONTH" -> "/mo"
+            "WEEK" -> "/wk"
+            "DAY" -> "/day"
+            else -> if ((max ?: min!!) < 1000) "/hr" else "/yr"
+        }
+        val currency = baseSalary.path("currency").asText("").ifBlank { holder.path("currency").asText("") }
+        val symbol = if (currency.isBlank() || currency.equals("USD", ignoreCase = true)) "\$" else "$currency "
+        fun money(v: Double) =
+            if (v >= 1000) "$symbol${Math.round(v / 1000)}K" else "$symbol${"%.2f".format(v).removeSuffix(".00")}"
+        return when {
+            min != null && max != null && min != max -> "${money(min)} - ${money(max)}$suffix"
+            else -> "${money(min ?: max!!)}$suffix"
+        }
+    }
+
+    /** `experienceRequirements` is either `{monthsOfExperience: 60}` or free text ("5+ years ..."). */
+    private fun jsonLdYearsOfExperience(node: com.fasterxml.jackson.databind.JsonNode): Int? {
+        val months = node.path("monthsOfExperience").asInt(0)
+        if (months > 0) return (months + 11) / 12
+        val text = if (node.isTextual) node.asText() else node.path("description").asText("")
+        return Regex("(\\d{1,2})\\+?\\s*(?:-\\s*\\d{1,2}\\s*)?years?", RegexOption.IGNORE_CASE)
+            .find(text)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it in 1..40 }
+    }
+
+    /** `skills` is a comma-separated string, an array of strings, or an array of DefinedTerms. */
+    private fun jsonLdSkills(node: com.fasterxml.jackson.databind.JsonNode): List<String> = when {
+        node.isArray -> node.mapNotNull { e ->
+            (if (e.isTextual) e.asText() else e.path("name").asText("")).trim().takeIf { it.isNotBlank() }
+        }
+        node.isTextual -> node.asText().split(",").map { it.trim() }.filter { it.isNotBlank() }
+        else -> emptyList()
+    }
+
+    /**
+     * Apply [facts] to [state]. The page's own structured data describes this exact posting, so it
+     * replaces email-digest guesses for the metadata fields unless [fillOnly]; title/company/location
+     * always only fill blanks.
+     */
+    internal fun applyJobPostingFacts(state: JDState, facts: JobPostingFacts, fillOnly: Boolean = false): JDState {
+        fun blank(v: String) = v.isBlank() || v == "unknown"
+        var s = state
+        if (blank(s.roleTitle) && facts.title.isNotBlank()) s = s.copy(roleTitle = facts.title)
+        if (blank(s.company) && facts.company.isNotBlank()) s = s.copy(company = facts.company)
+        if (blank(s.location) && facts.location.isNotBlank()) s = s.copy(location = facts.location)
+        if (facts.remotePolicy.isNotBlank() && (!fillOnly || blank(s.remotePolicy))) s = s.copy(remotePolicy = facts.remotePolicy)
+        if (facts.salaryRange.isNotBlank() && (!fillOnly || s.salaryRange.isBlank())) s = s.copy(salaryRange = facts.salaryRange)
+        if (facts.employmentType.isNotBlank() && (!fillOnly || s.employmentType.isBlank())) s = s.copy(employmentType = facts.employmentType)
+        if (facts.yoeRequired != null && (!fillOnly || s.yoeRequired == null)) s = s.copy(yoeRequired = facts.yoeRequired)
+        if (facts.skills.isNotEmpty() && (!fillOnly || s.techStack.isEmpty())) s = s.copy(techStack = facts.skills)
+        return s
     }
 
     private fun findJobPostingNode(node: com.fasterxml.jackson.databind.JsonNode): com.fasterxml.jackson.databind.JsonNode? {
@@ -688,7 +853,7 @@ class ScrapeJdNode(
 
     // ── LLM extraction ────────────────────────────────────────────────────────
 
-    private fun parseJobPage(input: JDState, url: String, content: String): JDState {
+    internal fun parseJobPage(input: JDState, url: String, content: String, rawHtml: String = ""): JDState {
         val emailJdText = input.jdText   // preserve before clearing — restored as last-resort fallback
         val emailCompany = input.company
         val emailRoleTitle = input.roleTitle
@@ -709,7 +874,8 @@ class ScrapeJdNode(
             $truncated
         """.trimIndent()
 
-        var state = input.copy(scrapedContent = content, jdText = "")
+        val base = input.copy(scrapedContent = content, jdText = "")
+        var state = base
 
         // Jobright: extract all structured fields directly from __NEXT_DATA__ JSON.
         // The SSR'd visible HTML is often incomplete (e.g. only Responsibilities), while
@@ -725,24 +891,40 @@ class ScrapeJdNode(
             }
         }
 
-        try {
-            val llmResponse = llm.call(prompt)
-            // LLM overrides only blank Jobright fields — structured extraction takes precedence for jd_text
-            val llmState = applyLlmFields(state, llmResponse)
-            state = if (isJobrightUrl(url) && state.jdText.isNotBlank()) {
-                // Keep Jobright-extracted jd_text; take other LLM fields where Jobright had nothing
-                llmState.copy(jdText = state.jdText)
-            } else {
-                llmState
-            }
+        // Jobright also exposes report metadata in client-data scripts and JSON-LD outside
+        // __NEXT_DATA__. Salesforce's page keeps salary, work model, and seniority there.
+        // Read it before the LLM so optional facts it omits cannot turn into report placeholders.
+        // Needs the raw HTML: the cleaned content has had its <script> blocks stripped.
+        if (isJobrightUrl(url)) {
+            state = applyJobrightRawPageMetadata(state, rawHtml.ifBlank { content })
+        }
+
+        // schema.org JobPosting (Dice, Built In, Indeed, ZipRecruiter, Greenhouse, Lever, Workday…):
+        // remote / salary / employment type / experience / skills, straight from the page.
+        // Jobright's own job object (read above) is richer than its JSON-LD, so there it only fills gaps.
+        parseJobPostingFacts(rawHtml)?.let { facts ->
+            state = applyJobPostingFacts(state, facts, fillOnly = isJobrightUrl(url))
+            log("[scrape_jd] JSON-LD JobPosting applied (remote=${facts.remotePolicy.ifBlank { "-" }}, " +
+                "salary=${facts.salaryRange.ifBlank { "-" }}, type=${facts.employmentType.ifBlank { "-" }})")
+        }
+        val structured = state
+
+        val llmResponse = try {
+            // One retry on an unparseable reply: glm occasionally drops the opening `{"role`.
+            callLlmForJson(prompt) ?: callLlmForJson(prompt)
         } catch (e: Exception) {
             log("[scrape_jd] LLM extraction failed: ${e.message}")
-            // Regex-based salary/remote fallback when LLM is unavailable
+            null
+        }
+        if (llmResponse != null) {
+            state = keepStructuredFields(applyLlmFields(state, llmResponse), structured, base)
+        } else {
+            // Regex-based salary/remote fallback when the LLM is unavailable or unparseable
             val salary = extractSalary(content)
             val remotePolicy = extractRemotePolicy(content)
             state = state.copy(
-                salaryRange = if (salary.isNotEmpty()) salary else state.salaryRange,
-                remotePolicy = remotePolicy
+                salaryRange = state.salaryRange.ifBlank { salary },
+                remotePolicy = if (state.remotePolicy.isBlank() || state.remotePolicy == "unknown") remotePolicy else state.remotePolicy,
             )
         }
 
@@ -774,48 +956,82 @@ class ScrapeJdNode(
     }
 
     /**
-     * Parse the LLM JSON response with Jackson and return an updated JDState.
-     * Fields absent or null in the response fall back to the current state values.
+     * Call the extraction LLM and return its reply as a JSON object, or null when the reply has no
+     * parseable object. Tolerates fences and chatter around the object ("json\n{...}").
      */
-    private fun applyLlmFields(state: JDState, responseText: String): JDState {
-        val cleaned = responseText.replace(Regex("```(?:json)?"), "").trim()
-            .let { if (it.endsWith("`")) it.dropLast(1).trim() else it }
-
-        return try {
-            val node = mapper.readTree(cleaned)
-
-            val roleTitle = node.path("role_title").asText("").takeIf { it.isNotBlank() && it != "null" }
-            val company = node.path("company").asText("").takeIf { it.isNotBlank() && it != "null" }
-            val location = node.path("location").asText("").takeIf { it.isNotBlank() && it != "null" }
-            val remotePolicy = node.path("remote_policy").asText("").takeIf { it.isNotBlank() && it != "null" }
-            val salaryRange = node.path("salary_range").asText("").takeIf { it.isNotBlank() && it != "null" }
-            val employmentType = node.path("employment_type").asText("").takeIf { it.isNotBlank() && it != "null" }
-            val seniorityLevel = node.path("seniority_level").asText("").takeIf { it.isNotBlank() && it != "null" }
-            val yoeRequired = node.path("yoe_required").asInt(0).takeIf { it > 0 }
-            val techStack = node.path("tech_stack").map { it.asText() }.filter { it.isNotBlank() }
-            val benefits = node.path("benefits").map { it.asText() }.filter { it.isNotBlank() }
-            val companyDescription = node.path("company_description").asText("").takeIf { it.isNotBlank() && it != "null" }
-            val jdText = node.path("jd_text").asText("").takeIf { it.isNotBlank() && it != "null" }
-
-            state.copy(
-                roleTitle = roleTitle ?: state.roleTitle,
-                company = company ?: state.company,
-                location = location ?: state.location,
-                remotePolicy = remotePolicy ?: state.remotePolicy,
-                salaryRange = salaryRange ?: state.salaryRange,
-                employmentType = employmentType ?: state.employmentType,
-                seniorityLevel = seniorityLevel ?: state.seniorityLevel,
-                yoeRequired = yoeRequired ?: state.yoeRequired,
-                techStack = if (techStack.isNotEmpty()) techStack else state.techStack,
-                benefits = if (benefits.isNotEmpty()) benefits else state.benefits,
-                companyDescription = companyDescription ?: state.companyDescription,
-                jdText = jdText ?: state.jdText,
-                isJobPosting = jdText != null
-            )
-        } catch (e: Exception) {
-            log("[scrape_jd] LLM response parse failed: ${e.message}")
-            state
+    private fun callLlmForJson(prompt: String): com.fasterxml.jackson.databind.JsonNode? {
+        val reply = llm.call(prompt)
+        return parseLlmJson(reply).also {
+            if (it == null) log("[scrape_jd] LLM response parse failed: ${reply.take(120).replace("\n", " ")}")
         }
+    }
+
+    internal fun parseLlmJson(reply: String): com.fasterxml.jackson.databind.JsonNode? {
+        val start = reply.indexOf('{')
+        val end = reply.lastIndexOf('}')
+        if (start < 0 || end <= start) return null
+        return runCatching { mapper.readTree(reply.substring(start, end + 1)) }.getOrNull()?.takeIf { it.isObject }
+    }
+
+    /**
+     * Fields the structured pass ([structured]) changed from [base] came from data the page embeds
+     * for this exact posting, so they beat the LLM's reading of the same page in [llm].
+     */
+    private fun keepStructuredFields(llm: JDState, structured: JDState, base: JDState): JDState {
+        fun <T> pick(s: T, b: T, l: T): T = if (s != b) s else l
+        return llm.copy(
+            roleTitle = pick(structured.roleTitle, base.roleTitle, llm.roleTitle),
+            company = pick(structured.company, base.company, llm.company),
+            location = pick(structured.location, base.location, llm.location),
+            remotePolicy = pick(structured.remotePolicy, base.remotePolicy, llm.remotePolicy),
+            salaryRange = pick(structured.salaryRange, base.salaryRange, llm.salaryRange),
+            employmentType = pick(structured.employmentType, base.employmentType, llm.employmentType),
+            seniorityLevel = pick(structured.seniorityLevel, base.seniorityLevel, llm.seniorityLevel),
+            yoeRequired = pick(structured.yoeRequired, base.yoeRequired, llm.yoeRequired),
+            techStack = pick(structured.techStack, base.techStack, llm.techStack),
+            benefits = pick(structured.benefits, base.benefits, llm.benefits),
+            companyDescription = pick(structured.companyDescription, base.companyDescription, llm.companyDescription),
+            // Jobright's __NEXT_DATA__ sections are the full JD; the LLM's jd_text is a re-typing of it.
+            jdText = pick(structured.jdText, base.jdText, llm.jdText),
+        )
+    }
+
+    /**
+     * Apply the LLM's JSON fields to [state]. Fields absent, null, or "unknown" in the response
+     * fall back to the current state values.
+     */
+    private fun applyLlmFields(state: JDState, node: com.fasterxml.jackson.databind.JsonNode): JDState {
+        fun text(key: String): String? = node.path(key).asText("").trim()
+            .takeIf { it.isNotBlank() && it.lowercase() !in setOf("null", "unknown", "n/a", "none") }
+
+        val roleTitle = text("role_title")
+        val company = text("company")
+        val location = text("location")
+        val remotePolicy = text("remote_policy")
+        val salaryRange = text("salary_range")
+        val employmentType = text("employment_type")
+        val seniorityLevel = text("seniority_level")
+        val yoeRequired = node.path("yoe_required").asInt(0).takeIf { it > 0 }
+        val techStack = node.path("tech_stack").map { it.asText() }.filter { it.isNotBlank() }
+        val benefits = node.path("benefits").map { it.asText() }.filter { it.isNotBlank() }
+        val companyDescription = text("company_description")
+        val jdText = text("jd_text")
+
+        return state.copy(
+            roleTitle = roleTitle ?: state.roleTitle,
+            company = company ?: state.company,
+            location = location ?: state.location,
+            remotePolicy = remotePolicy ?: state.remotePolicy,
+            salaryRange = salaryRange ?: state.salaryRange,
+            employmentType = employmentType ?: state.employmentType,
+            seniorityLevel = seniorityLevel ?: state.seniorityLevel,
+            yoeRequired = yoeRequired ?: state.yoeRequired,
+            techStack = if (techStack.isNotEmpty()) techStack else state.techStack,
+            benefits = if (benefits.isNotEmpty()) benefits else state.benefits,
+            companyDescription = companyDescription ?: state.companyDescription,
+            jdText = jdText ?: state.jdText,
+            isJobPosting = jdText != null
+        )
     }
 
     /**
@@ -1010,6 +1226,71 @@ class ScrapeJdNode(
         }
     }
 
+    /**
+     * Fills metadata Jobright keeps in raw client-data scripts or JSON-LD rather than its
+     * __NEXT_DATA__ job object. Existing values remain authoritative.
+     */
+    internal fun applyJobrightRawPageMetadata(state: JDState, rawHtml: String): JDState {
+        fun rawString(key: String): String {
+            val pattern = Regex("[\\\"']${Regex.escape(key)}[\\\"']\\s*:\\s*[\\\"']([^\\\"']+)[\\\"']")
+            return pattern.find(rawHtml)?.groupValues?.get(1)?.trim().orEmpty()
+        }
+
+        var s = state
+        val rawSalary = rawString("salaryDesc").ifBlank { rawString("salaryString") }
+        if (s.salaryRange.isBlank() && rawSalary.isNotBlank()) s = s.copy(salaryRange = rawSalary)
+        if (s.remotePolicy.isBlank() || s.remotePolicy == "unknown") {
+            rawString("workModel").takeIf { it.isNotBlank() }?.let { s = s.copy(remotePolicy = it) }
+        }
+        if (s.seniorityLevel.isBlank()) {
+            rawString("jobSeniority").takeIf { it.isNotBlank() }?.let { s = s.copy(seniorityLevel = it) }
+        }
+        if (s.employmentType.isBlank()) {
+            rawString("employmentType").takeIf { it.isNotBlank() }?.let {
+                s = s.copy(employmentType = normalizeEmploymentType(it))
+            }
+        }
+        if (s.location.isBlank() || s.location == "unknown") {
+            rawString("jobLocation").takeIf { it.isNotBlank() }?.let { s = s.copy(location = it) }
+        }
+
+        val posting = Jsoup.parse(rawHtml).select("script[type=application/ld+json]")
+            .asSequence()
+            .mapNotNull { script -> runCatching { mapper.readTree(script.data().trim()) }.getOrNull() }
+            .mapNotNull(::findJobPostingNode)
+            .firstOrNull()
+            ?: return s
+
+        if (s.location.isBlank() || s.location == "unknown") {
+            val address = posting.path("jobLocation").let { locations ->
+                (if (locations.isArray) locations.firstOrNull() else locations)?.path("address")
+            }
+            val location = listOfNotNull(
+                address?.path("addressLocality")?.asText()?.takeIf { it.isNotBlank() },
+                address?.path("addressRegion")?.asText()?.takeIf { it.isNotBlank() },
+            ).joinToString(", ")
+            if (location.isNotBlank()) s = s.copy(location = location)
+        }
+        if (s.employmentType.isBlank()) {
+            val employmentType = posting.path("employmentType").let {
+                if (it.isArray) it.firstOrNull()?.asText().orEmpty() else it.asText("")
+            }
+            if (employmentType.isNotBlank()) s = s.copy(employmentType = normalizeEmploymentType(employmentType))
+        }
+        if (s.salaryRange.isBlank()) {
+            val value = posting.path("baseSalary").path("value")
+            val min = value.path("minValue").asLong(0).takeIf { it > 0 }
+            val max = value.path("maxValue").asLong(0).takeIf { it > 0 }
+            val salary = when {
+                min != null && max != null -> "\$${min / 1000}K – \$${max / 1000}K"
+                min != null -> "\$${min / 1000}K+"
+                else -> ""
+            }
+            if (salary.isNotBlank()) s = s.copy(salaryRange = salary)
+        }
+        return s
+    }
+
     /** First non-blank string value among [keys] on [node] (ignores literal "null"). */
     private fun firstText(node: com.fasterxml.jackson.databind.JsonNode, vararg keys: String): String =
         keys.asSequence().map { node.path(it).asText("").trim() }
@@ -1048,7 +1329,7 @@ class ScrapeJdNode(
     private fun normalizeEmploymentType(raw: String): String = when (raw.uppercase().replace("-", "_").replace(" ", "_")) {
         "FULL_TIME", "FULLTIME" -> "Full-time"
         "PART_TIME", "PARTTIME" -> "Part-time"
-        "CONTRACT" -> "Contract"
+        "CONTRACT", "CONTRACTOR" -> "Contract"
         "INTERNSHIP" -> "Internship"
         "TEMPORARY" -> "Temporary"
         else -> raw
@@ -1192,7 +1473,7 @@ class ScrapeJdNode(
                 throw AuthRequiredException(site, "$site blocked — $captchaReason at ${page.url()}")
             }
             log("[scrape_jd] Playwright fetch still blocked: $captchaReason")
-            return PageContent(rawHtml, "", "Playwright: $captchaReason")
+            return PageContent(rawHtml, "", "Playwright: $captchaReason", isCaptchaBlock = true)
         }
 
         // Prefer innerText for SPA-rendered content (cleaner than Jsoup on a hydrated DOM), but

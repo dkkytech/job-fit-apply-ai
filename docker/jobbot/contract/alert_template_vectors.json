@@ -1,0 +1,158 @@
+{
+  "_comment": "Alert template rules shared by the notifier (AlertTemplate) and jobbot-mcp (the template tools). Both test suites must pass every case. {details} is location · remote policy · salary · via source (whatever is known); {strengths} is the top three as bullets; {gap} is the first gap. A line whose placeholders all render empty is dropped.",
+  "placeholders": [
+    "company",
+    "title",
+    "company_link",
+    "title_link",
+    "score",
+    "action",
+    "ref",
+    "details",
+    "strengths",
+    "gap"
+  ],
+  "max_length": 1000,
+  "allowed_tags": [
+    "b",
+    "i",
+    "u",
+    "s",
+    "code",
+    "pre",
+    "blockquote"
+  ],
+  "valid": [
+    "High-fit: {company_link} — {title_link} — {score}\n{ref}",
+    "<b>{score}</b> {company} · {title}\n{ref}",
+    "<blockquote>{title_link}</blockquote>\n<i>{action}</i> {ref}",
+    "<b><i>{score}</i></b> {title}\n{ref}",
+    "{company_link}: {title_link} ({score})\n{details}\n\nFit:\n{strengths}\n\nGap: {gap}\n{ref}"
+  ],
+  "invalid": [
+    {
+      "template": "High-fit: {company} — {score}",
+      "why": "no {ref}"
+    },
+    {
+      "template": "{ref} <a href=\"https://evil.example\">click</a>",
+      "why": "links are built in code only"
+    },
+    {
+      "template": "{ref} {salary}",
+      "why": "unknown placeholder"
+    },
+    {
+      "template": "{ref} <script>x</script>",
+      "why": "tag not allowed"
+    },
+    {
+      "template": "{ref} <b>unclosed",
+      "why": "unbalanced tag"
+    },
+    {
+      "template": "{ref} </i>",
+      "why": "unbalanced tag"
+    },
+    {
+      "template": "",
+      "why": "empty"
+    },
+    {
+      "template": "{ref} <b><i>x</b></i>",
+      "why": "mis-nested tags"
+    }
+  ],
+  "render": [
+    {
+      "template": "<b>{score}</b> {company_link} — {title_link} ({action})\n{ref}",
+      "event": {
+        "company": "Acme & Co",
+        "title": "Staff <SDET>",
+        "score": "72",
+        "action": "TAILOR",
+        "ref": "#J9",
+        "job_url": "https://acme.co/j?a=1&b=2",
+        "report_url": "http://host:8081/x/report.md"
+      },
+      "expected": "<b>72</b> <a href=\"https://acme.co/j?a=1&amp;b=2\">Acme &amp; Co</a> — <a href=\"http://host:8081/x/report.md\">Staff &lt;SDET&gt;</a> (TAILOR)\n#J9"
+    },
+    {
+      "template": "{company_link} · {title_link}\n{ref}",
+      "event": {
+        "company": "Beta",
+        "title": "QA",
+        "score": "60",
+        "action": "TAILOR",
+        "ref": "#J10",
+        "job_url": null,
+        "report_url": null
+      },
+      "expected": "Beta · QA\n#J10"
+    },
+    {
+      "template": "{company_link}: {title_link} ({score})\n{details}\n\nFit:\n{strengths}\n\nGap: {gap}\n{ref}",
+      "event": {
+        "company": "Acme",
+        "title": "Staff SDET",
+        "score": "72",
+        "action": "TAILOR",
+        "ref": "#J11",
+        "job_url": null,
+        "report_url": null,
+        "location": "Seattle, WA",
+        "remote_policy": "hybrid",
+        "salary": "$150K–$180K",
+        "source": "jobright.ai",
+        "strengths": [
+          "Kotlin & CI <ownership>",
+          "Espresso",
+          "  ",
+          "XCUITest",
+          "Fourth one"
+        ],
+        "gaps": [
+          "",
+          "No Pact experience",
+          "Second gap"
+        ]
+      },
+      "expected": "Acme: Staff SDET (72)\nSeattle, WA · hybrid · $150K–$180K · via jobright.ai\n\nFit:\n• Kotlin &amp; CI &lt;ownership&gt;\n• Espresso\n• XCUITest\n\nGap: No Pact experience\n#J11"
+    },
+    {
+      "template": "{title}\n{details}\n<b>Gap:</b> {gap}\n{strengths}\n{ref}",
+      "event": {
+        "company": "Beta",
+        "title": "QA",
+        "score": "60",
+        "action": "SKIP",
+        "ref": "#J12",
+        "job_url": null,
+        "report_url": null,
+        "location": null,
+        "remote_policy": "unknown",
+        "salary": "",
+        "source": null,
+        "strengths": [],
+        "gaps": []
+      },
+      "expected": "QA\n#J12"
+    },
+    {
+      "template": "{strengths}\n{ref}",
+      "event": {
+        "company": "C",
+        "title": "T",
+        "score": "60",
+        "action": "TAILOR",
+        "ref": "#J13",
+        "job_url": null,
+        "report_url": null,
+        "strengths": [
+          "Owned Kotlin test infrastructure across xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        ]
+      },
+      "expected": "• Owned Kotlin test infrastructure across xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…\n#J13"
+    }
+  ]
+}

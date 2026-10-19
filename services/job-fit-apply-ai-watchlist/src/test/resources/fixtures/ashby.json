@@ -1,0 +1,5 @@
+{"jobs":[
+ {"id":"u-1","title":"Test Engineer","location":"Everett, WA","secondaryLocations":[{"location":"Remote"}],"isRemote":false,
+  "isListed":true,"jobUrl":"https://jobs.ashbyhq.com/acme/u-1","descriptionPlain":"Fusion test rigs."},
+ {"id":"u-2","title":"Hidden Test Role","location":"Seattle, WA","isListed":false,"jobUrl":"https://jobs.ashbyhq.com/acme/u-2","descriptionPlain":"x"}
+]}

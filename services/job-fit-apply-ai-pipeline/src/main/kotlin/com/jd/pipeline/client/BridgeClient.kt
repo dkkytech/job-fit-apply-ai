@@ -55,6 +55,34 @@ class BridgeClient(
         }
     }
 
+    /**
+     * POST /api/urls — a posting known only by its link; the bridge dedupes it on [key] / [url]
+     * within [source]'s window and the processor scrapes it at claim time (JD_URL).
+     */
+    fun submitUrl(
+        url: String,
+        key: String,
+        source: String,
+        company: String? = null,
+        roleTitle: String? = null,
+        location: String? = null,
+    ): SubmitOutcome {
+        val json = mapper.writeValueAsString(
+            mapOf(
+                "url" to url, "idempotency_key" to key, "source" to source,
+                "company" to company?.ifBlank { null }, "role_title" to roleTitle?.ifBlank { null },
+                "location" to location?.ifBlank { null },
+            ),
+        )
+        val req = HttpPost("$baseUrl/api/urls").apply { entity = StringEntity(json, ContentType.APPLICATION_JSON) }
+        return http.execute(req) { resp ->
+            val body = EntityUtils.toString(resp.entity, Charsets.UTF_8)
+            check(resp.code in 200..202) { "POST /api/urls → ${resp.code}: $body" }
+            val tree = mapper.readTree(body)
+            SubmitOutcome(jobId = tree.get("job_id").asText(), deduped = tree.get("deduped")?.asBoolean(false) ?: false)
+        }
+    }
+
     // ── Status polling ────────────────────────────────────────────────────────
 
     fun getStatus(jobId: String): JobStatusDto {
@@ -80,6 +108,24 @@ class BridgeClient(
         throw RuntimeException("Timed out waiting for job $jobId after ${timeoutMs}ms")
     }
 
+    // ── Deferred tailoring ────────────────────────────────────────────────────
+
+    /**
+     * POST /api/tailoring/release-deferred — expire DEFERRED jobs older than [maxAgeDays], then queue
+     * the best-fit rest as TAILOR_REQUESTs until [limit] are in flight. `limit = 0` only expires.
+     */
+    fun releaseDeferred(limit: Int, maxAgeDays: Int): DeferredRelease {
+        val json = mapper.writeValueAsString(mapOf("limit" to limit, "max_age_days" to maxAgeDays))
+        val req = HttpPost("$baseUrl/api/tailoring/release-deferred").apply {
+            entity = StringEntity(json, ContentType.APPLICATION_JSON)
+        }
+        return http.execute(req) { resp ->
+            val body = EntityUtils.toString(resp.entity, Charsets.UTF_8)
+            check(resp.code == 200) { "POST /api/tailoring/release-deferred → ${resp.code}: $body" }
+            mapper.readValue(body, DeferredRelease::class.java)
+        }
+    }
+
     // ── Worker endpoints ──────────────────────────────────────────────────────
 
     /**
@@ -96,7 +142,8 @@ class BridgeClient(
     }
 
     /**
-     * POST the terminal result. [claimToken] is the fence the bridge handed out with the claim:
+     * POST a result. A retryable result is accepted with 202 after the bridge durably defers it.
+     * [claimToken] is the fence the bridge handed out with the claim:
      * if this claim was requeued and re-claimed while we were working, the bridge refuses the
      * write (409) rather than letting us overwrite the attempt that replaced us.
      */
@@ -114,7 +161,7 @@ class BridgeClient(
         }
         http.execute(req) { resp ->
             val body = EntityUtils.toString(resp.entity, Charsets.UTF_8)
-            check(resp.code == 200) { "POST /api/jobs/$jobId/result → ${resp.code}: $body" }
+            check(resp.code == 200 || resp.code == 202) { "POST /api/jobs/$jobId/result → ${resp.code}: $body" }
         }
     }
 
@@ -159,6 +206,8 @@ object WorkItemType {
     const val EMAIL_RAW   = "EMAIL_RAW"    // raw email — the Processor scans/scrapes it
     const val JD_SCRAPED  = "JD_SCRAPED"   // pre-structured JdRecord (JSearch / digest child)
     const val JD_PAGE_RAW = "JD_PAGE_RAW"  // raw captured web-page content — the Processor LLM-extracts it
+    const val JD_URL      = "JD_URL"       // a posting known only by its link — the Processor scrapes it
+    const val TAILOR_REQUEST = "TAILOR_REQUEST" // a Tailor tap on an OFFERed job — the Processor tailors it
 }
 
 /** A raw email claimed from the queue (payload of an EMAIL_RAW item). */
@@ -178,6 +227,45 @@ data class ClaimedPageCapture(
     val title: String = "",
 )
 
+/** A posting URL claimed from the queue (payload of a JD_URL item); the other fields are hints. */
+data class ClaimedUrl(
+    val url: String,
+    val source: String? = null,
+    val company: String? = null,
+    val roleTitle: String? = null,
+    val location: String? = null,
+    val idempotencyKey: String? = null,
+)
+
+/**
+ * A Tailor tap on an OFFERed job (payload of a TAILOR_REQUEST item): the bridge copies in the
+ * [record] the OFFER handed back, plus the job's `tracks` row and job board.
+ */
+data class ClaimedTailorRequest(
+    val record: JdRecord,
+    val parentJobId: String,
+    val trackId: Int? = null,
+    val jobBoard: String? = null,
+)
+
+/** One DEFERRED job the bridge released or expired. [tailorJobId] is set for a released one. */
+data class DeferredJob(
+    val jobId: String,
+    val company: String? = null,
+    val roleTitle: String? = null,
+    val fitScore: Int? = null,
+    val artifactUrl: String? = null,
+    val jobUrl: String? = null,
+    val tailorJobId: String? = null,
+)
+
+/** What one release sweep did: queued [released], gave up on [expired], left [remaining] deferred. */
+data class DeferredRelease(
+    val released: List<DeferredJob> = emptyList(),
+    val expired: List<DeferredJob> = emptyList(),
+    val remaining: Int = 0,
+)
+
 /** Result of a submission: the job it maps to, and whether the bridge deduped it. */
 data class SubmitOutcome(val jobId: String, val deduped: Boolean)
 
@@ -187,6 +275,8 @@ data class ClaimDto(
     val jdRecord: JdRecord? = null,               // set for JD_SCRAPED
     val email: ClaimedEmail? = null,              // set for EMAIL_RAW
     val pageCapture: ClaimedPageCapture? = null,  // set for JD_PAGE_RAW
+    val url: ClaimedUrl? = null,                  // set for JD_URL
+    val tailor: ClaimedTailorRequest? = null,     // set for TAILOR_REQUEST
     /** Fence for this claim; present it on postResult. Null against a pre-fencing bridge. */
     val claimToken: String? = null,
 )
@@ -204,6 +294,10 @@ internal fun parseClaimTree(tree: com.fasterxml.jackson.databind.JsonNode): Clai
             ClaimDto(jobId = jobId, type = type, email = mapper.treeToValue(payload, ClaimedEmail::class.java), claimToken = token)
         WorkItemType.JD_PAGE_RAW ->
             ClaimDto(jobId = jobId, type = type, pageCapture = mapper.treeToValue(payload, ClaimedPageCapture::class.java), claimToken = token)
+        WorkItemType.JD_URL ->
+            ClaimDto(jobId = jobId, type = type, url = mapper.treeToValue(payload, ClaimedUrl::class.java), claimToken = token)
+        WorkItemType.TAILOR_REQUEST ->
+            ClaimDto(jobId = jobId, type = type, tailor = mapper.treeToValue(payload, ClaimedTailorRequest::class.java), claimToken = token)
         else ->
             ClaimDto(jobId = jobId, type = type, jdRecord = mapper.treeToValue(payload, JdRecord::class.java), claimToken = token)
     }

@@ -23,7 +23,7 @@ object Main {
             Command.Poll -> {
                 val nc = NotificationClient()
                 println("[notifier] starting — bridge=${Config.JD_BRIDGE_URL}, " +
-                    "discord=${nc.discordConfigured}, telegram=${nc.telegramConfigured}, threshold=${Config.NOTIFICATION_FIT_THRESHOLD}")
+                    "discord=${nc.discordConfigured}, telegram=${nc.telegramConfigured}, threshold=${Config.FIT_THRESHOLD}")
                 if (!nc.discordConfigured && !nc.telegramConfigured)
                     System.err.println("[notifier] WARNING: no Discord/Telegram credentials — nothing will be sent")
                 loop(nc).runForever()

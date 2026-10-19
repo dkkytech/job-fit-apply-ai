@@ -1,0 +1,5 @@
+{"jobs":[
+ {"requisitionId":"6a633bd9-bf93-4a11-b17a-8332b6ca23fa","jobTitle":"Software Test Engineer","workAddress":{"administrativeArea":"WA","locality":"Bellevue"},"postedDate":"2026-10-06T23:39:22.1Z","workRemote":true,"jobType":"Contract","jobStatus":"active"},
+ {"requisitionId":"79188d80-7812-4df8-82f8-045ac82c8b37","jobTitle":"Electrical Test Engineer","workAddress":{"administrativeArea":"WA","locality":"Redmond"},"workRemote":false,"jobStatus":"active"},
+ {"requisitionId":"","jobTitle":"No id, no posting","workAddress":{"administrativeArea":"WA","locality":"Seattle"},"workRemote":false}
+],"pageMetadata":{"size":50,"number":1,"totalElements":4,"totalPages":2}}

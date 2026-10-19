@@ -33,12 +33,14 @@ env_port() { # env_port <VAR> <default> — read VAR from ENV_FILE (env var wins
 MARKSERV_PORT="$(env_port MARKSERV_PORT 8081)"
 BRIDGE_PORT="$(env_port JD_BRIDGE_PORT 8765)"
 FRONTEND_PORT="$(env_port FRONTEND_PORT 3030)"
+JOBBOT_BROWSER_VIEWER_PORT="$(env_port JOBBOT_BROWSER_VIEWER_PORT "$(env_port APPLY_VIEWER_PORT 3200)")"
 
 # One line per tailnet-exposed service: "<tailnet-port>|<local-target>|<label>".
 SERVICES="
 $MARKSERV_PORT|http://127.0.0.1:$MARKSERV_PORT|markserv
 $BRIDGE_PORT|http://127.0.0.1:$BRIDGE_PORT|bridge
 $FRONTEND_PORT|http://127.0.0.1:$FRONTEND_PORT|frontend
+$JOBBOT_BROWSER_VIEWER_PORT|http://127.0.0.1:$JOBBOT_BROWSER_VIEWER_PORT|jobbot-browser-viewer
 "
 
 # TCP connect check on the host loopback (bash /dev/tcp).
@@ -47,8 +49,14 @@ port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&-; retu
 echo "$SERVICES" | while IFS='|' read -r port target label; do
   [ -z "${port:-}" ] && continue
   if port_open "$port"; then
-    echo "→ serve $label: http://<tailnet-name>:$port  →  $target"
-    "$TS" serve --bg --http="$port" "$target"
+    if [ "$label" = "apply-viewer" ]; then
+      # The apply browser's viewer streams over WebRTC/websockets: browsers want a secure context.
+      echo "→ serve $label: https://<tailnet-name>:$port  →  $target"
+      "$TS" serve --bg --https="$port" "$target"
+    else
+      echo "→ serve $label: http://<tailnet-name>:$port  →  $target"
+      "$TS" serve --bg --http="$port" "$target"
+    fi
   else
     echo "⚠ skip $label: nothing listening on 127.0.0.1:$port (start its container first)"
   fi

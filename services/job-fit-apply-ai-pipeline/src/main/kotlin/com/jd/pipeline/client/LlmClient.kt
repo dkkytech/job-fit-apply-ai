@@ -13,7 +13,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import kotlin.math.pow
 
-enum class LlmBackend { MLX_LOCAL, OLLAMA_LOCAL, OLLAMA_CLOUD, DEEPSEEK_CLOUD, MINIMAX_CLOUD }
+enum class LlmBackend(val isCloud: Boolean) {
+    MLX_LOCAL(false), OLLAMA_LOCAL(false), OLLAMA_CLOUD(true), DEEPSEEK_CLOUD(true), MINIMAX_CLOUD(true)
+}
 
 fun interface LlmCaller {
     fun call(prompt: String): String
@@ -223,13 +225,26 @@ class LlmClient(private val config: LlmConfig) : LlmCaller {
                 future.get(hardTimeoutSeconds, TimeUnit.SECONDS)
             } catch (e: TimeoutException) {
                 future.cancel(true)
-                throw RuntimeException("LLM call to $url exceeded hard timeout of ${hardTimeoutSeconds}s")
+                throw TransientLlmFailure("LLM call to $url exceeded hard timeout of ${hardTimeoutSeconds}s", e)
             } catch (e: ExecutionException) {
                 future.cancel(true)
-                throw RuntimeException("LLM call to $url failed: ${e.cause?.message ?: e.message}")
+                val message = "LLM call to $url failed: ${e.cause?.message ?: e.message}"
+                // Transport failures — HttpRequest.timeout()'s "request timed out", a reset or
+                // refused connection — say nothing about the request itself, so they are as
+                // retryable as a 5xx. Left as a plain RuntimeException, nodes that only rethrow
+                // TransientLlmFailure recorded them as a terminal JD_Error instead.
+                throw if (e.cause is java.io.IOException) TransientLlmFailure(message, e.cause) else RuntimeException(message)
             }
             if (response.statusCode() < 400) {
+                if (config.backend.isCloud) CloudQuota.shared.markHealthy()
                 return response.body()
+            }
+            // A used-up quota won't clear in seconds: no in-process retry. Mark it so the ingest/score
+            // lane switches to the local fallback, and throw the distinct type the fallback catches.
+            if (config.backend.isCloud && CloudQuota.isQuotaResponse(response.statusCode(), response.body())) {
+                val message = "LLM HTTP ${response.statusCode()} from $url: ${response.body().take(300)}"
+                CloudQuota.shared.markExhausted(message)
+                throw CloudQuotaExhausted(message)
             }
             if (response.statusCode() == 429 && attempt < MAX_RETRIES) {
                 val retryAfter = response.headers().firstValue("Retry-After").orElse(null)?.toLongOrNull()
@@ -242,7 +257,12 @@ class LlmClient(private val config: LlmConfig) : LlmCaller {
                 Thread.sleep(delayMs)
                 continue
             }
-            lastException = RuntimeException("LLM HTTP ${response.statusCode()} from $url: ${response.body().take(300)}")
+            val message = "LLM HTTP ${response.statusCode()} from $url: ${response.body().take(300)}"
+            lastException = if (response.statusCode() == 429 || response.statusCode() in 500..599) {
+                TransientLlmFailure(message)
+            } else {
+                RuntimeException(message)
+            }
             break
         }
         throw lastException ?: RuntimeException("LLM HTTP request failed after retries")
@@ -372,6 +392,25 @@ class LlmClient(private val config: LlmConfig) : LlmCaller {
         }
 
         /**
+         * [fromModelString] for the ingest/score lane (scan, digest, scrape, score_fit): when the
+         * model is a cloud model and LOCAL_FALLBACK_MODEL is set, calls switch to that local model
+         * while the cloud quota is exhausted (see [FallbackLlmCaller]). Tailoring never uses this.
+         */
+        fun forIngest(
+            model: String,
+            jsonMode: Boolean = true,
+            temperature: Double? = null,
+            timeoutSeconds: Long = 180,
+            nodeKey: String = "",
+            localFallbackModel: String = Config.LOCAL_FALLBACK_MODEL,
+        ): LlmCaller {
+            val primary = fromModelString(model, jsonMode, temperature, timeoutSeconds, nodeKey)
+            if (localFallbackModel.isBlank() || !backendFor(model).isCloud || backendFor(localFallbackModel).isCloud) return primary
+            val local = fromModelString(localFallbackModel, jsonMode, temperature, maxOf(timeoutSeconds, Config.LOCAL_FALLBACK_TIMEOUT_SECONDS), nodeKey)
+            return FallbackLlmCaller(primary, local, label = nodeKey.ifBlank { model })
+        }
+
+        /**
          * Determine the LLM backend from a model string.
          *   No suffix           → MLX_LOCAL (local oMLX, MLX_LOCAL_BASE_URL)
          *   ":ollama-local"     → OLLAMA_LOCAL (escape hatch, OLLAMA_LOCAL_BASE_URL)
@@ -379,7 +418,7 @@ class LlmClient(private val config: LlmConfig) : LlmCaller {
          *   "minimax*:cloud"    → MINIMAX_CLOUD
          *   "<other>:cloud"     → DEEPSEEK_CLOUD
          */
-        private fun backendFor(model: String): LlmBackend = when {
+        internal fun backendFor(model: String): LlmBackend = when {
             model.endsWith(":ollama-local") -> LlmBackend.OLLAMA_LOCAL
             model.endsWith(":ollama-cloud") -> LlmBackend.OLLAMA_CLOUD
             !model.endsWith(":cloud")       -> LlmBackend.MLX_LOCAL

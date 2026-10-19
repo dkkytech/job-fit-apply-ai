@@ -79,6 +79,11 @@ services:
     volumes:
       - ${E2E_STATE_DIR:-./.e2e}/jsearch-state:/state
 
+  watchlist:
+    profiles: ["e2e-disabled"]
+    volumes:
+      - ${E2E_STATE_DIR:-./.e2e}/watchlist-state:/state
+
   processor:
     container_name: "${COMPOSE_PROJECT_NAME:-jobfit-e2e}-processor"
     restart: "no"
@@ -89,6 +94,12 @@ services:
       db:
         condition: service_healthy
     environment:
+      # Pinned like the notifier's below: the base stack interpolates FIT_THRESHOLD from the
+      # repo-root .env, and the canned fit_score (72) must tailor regardless of a dev's value.
+      FIT_THRESHOLD: "50"
+      # Pinned for the same reason. The canned 72 is above it (tailored); the offer scenario's 60 is
+      # between the two, so it is offered and tailored only on a tap.
+      AUTO_TAILOR_MIN_SCORE: "70"
       # The in-process fake LLM in the e2e test JVM (host side).
       #
       # The default is 21436, NOT the production oMLX port 11436 that docker-compose.yml
@@ -98,8 +109,11 @@ services:
       # and with oMLX down the fake answers the *production* processor with fixture data.
       # Under REAL_LLM=1 the Makefile sets this to 11436 deliberately (no fake is started).
       MLX_LOCAL_BASE_URL: "http://host.docker.internal:${E2E_FAKE_LLM_PORT:-21436}/v1"
-      # Never reach for Steel or a host Chrome in e2e — JD_SCRAPED jobs skip scraping.
+      # Never reach for Steel or a host Chrome in e2e — JD_SCRAPED jobs skip scraping, and the
+      # JD_URL scenario scrapes a page the test JVM serves over plain HTTP (no browser needed).
       STEEL_BASE_URL: ""
+      # That page lives on host.docker.internal, which the scraper's SSRF guard refuses in prod.
+      SCRAPE_ALLOW_PRIVATE_HOSTS: "true"
     volumes:
       - ${E2E_STATE_DIR:-./.e2e}/output:/app/output
       - ${E2E_STATE_DIR:-./.e2e}/state:/app/state
@@ -132,8 +146,23 @@ services:
       # Default 20s poll would dominate the test's wall clock.
       NOTIFIER_POLL_INTERVAL_MS: "2000"
       # Pinned, not inherited from the repo-root .env: the canned fit_score is 72, and a
-      # dev with NOTIFICATION_FIT_THRESHOLD=90 would otherwise see the high-fit Telegram
+      # dev with FIT_THRESHOLD=90 would otherwise see the high-fit Telegram
       # assertions fail with no hint that their private .env is the cause.
-      NOTIFICATION_FIT_THRESHOLD: "50"
+      FIT_THRESHOLD: "50"
+      # Inline buttons. Links and every action verb are enabled so the suite verifies, at the
+      # wire, exactly which buttons each kind of event gets. E2E has no agent: nothing taps them,
+      # and the callbacks carry only <verb>:<completed_seq>, so no real state can be touched.
+      # Pinned so the suite cannot silently diverge when a dev's .env differs.
+      NOTIFIER_TELEGRAM_BUTTONS: "true"
+      NOTIFIER_TELEGRAM_LINK_BUTTONS: "true"
+      NOTIFIER_TELEGRAM_ACTIONS: "apply,reply,archive,tailor"
+      # No card template in E2E: the built-in format is what the suite pins.
+      NOTIFIER_TELEGRAM_TEMPLATE_FILE: ""
+      # The bridge publishes on the host at E2E_BRIDGE_PORT, so a bridge-relative resume path
+      # needs this base to become a URL a chat client could actually open. Without it the button
+      # would carry a bare "/api/jobs/.../resume.pdf", which is not a URL at all.
+      BRIDGE_PUBLIC_URL: "http://127.0.0.1:${E2E_BRIDGE_PORT:-18765}"
     volumes:
       - ${E2E_STATE_DIR:-./.e2e}/notifier-state:/state
+      # Overrides the prod card-template mount (unused here: the template file is blank).
+      - ${E2E_STATE_DIR:-./.e2e}/jobbot-templates:/templates:ro

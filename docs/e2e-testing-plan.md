@@ -59,7 +59,7 @@ The compose project name is `jobfit-e2e-<hash of the checkout path>`, and contai
 track it — `e2e-down` runs `down -v`, so a fixed name would let one worktree delete
 another's Postgres volume mid-run. Every e2e service also pins `restart: "no"` (the base
 stack's `unless-stopped` would leave a Ctrl-C'd slice holding the ports across reboots),
-and `POSTGRES_*` / `NOTIFICATION_FIT_THRESHOLD` are pinned in the override because compose
+and `POSTGRES_*` / `FIT_THRESHOLD` are pinned in the override because compose
 interpolates the repo-root `.env` regardless of project name.
 
 ### 3.3 Submit via `POST /api/jobs` (type `JD_SCRAPED`)

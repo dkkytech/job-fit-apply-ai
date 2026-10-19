@@ -29,9 +29,9 @@ class ConfigTest {
     }
 
     @Test
-    @DisplayName("NOTIFICATION_FIT_THRESHOLD defaults to 50")
+    @DisplayName("FIT_THRESHOLD defaults to 50")
     fun fitThresholdDefault() {
-        assertEquals(50, Config.NOTIFICATION_FIT_THRESHOLD)
+        assertEquals(50, Config.FIT_THRESHOLD)
     }
 
     @Test
@@ -61,7 +61,7 @@ class ConfigTest {
     @Test
     @DisplayName("numeric configs parse as positive longs/ints (sanity)")
     fun numericConfigsArePositive() {
-        assertTrue(Config.NOTIFICATION_FIT_THRESHOLD > 0)
+        assertTrue(Config.FIT_THRESHOLD > 0)
         assertTrue(Config.POLL_INTERVAL_MS > 0)
         assertTrue(Config.HEALTH_MAX_AGE_MS > 0)
     }
@@ -82,5 +82,12 @@ class ConfigTest {
     @DisplayName("missing credentials resolve to blank")
     fun missingCredentialsResolveBlank() {
         assertEquals("", resolveCredential(null, null))
+    }
+
+    @Test
+    @DisplayName("action buttons default to none, so a deploy never sends a button the agent cannot handle")
+    fun actionsDefaultBlank() {
+        assertEquals("", Config.TELEGRAM_ACTIONS)
+        assertEquals(emptySet(), com.jd.notifier.notify.TelegramButtons.parseActions(Config.TELEGRAM_ACTIONS))
     }
 }

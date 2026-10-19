@@ -31,6 +31,12 @@ class TerminalLabelTest {
     }
 
     @Test
+    fun `application update wins over recruiter response`() {
+        val s = JDState(isApplicationUpdate = true, isRecruiterResponseRequired = true)
+        assertEquals(TerminalLabel.APPLICATION_UPDATE, TerminalLabel.forState(s))
+    }
+
+    @Test
     fun `digest email (or inline digest)`() {
         assertEquals(TerminalLabel.JD_PROCESSED_DIGEST, TerminalLabel.forState(JDState(isJobPosting = true, intake = email(isDigest = true))))
         assertEquals(TerminalLabel.JD_PROCESSED_DIGEST, TerminalLabel.forState(JDState(isJobPosting = true, intake = email(isInlineDigest = true))))

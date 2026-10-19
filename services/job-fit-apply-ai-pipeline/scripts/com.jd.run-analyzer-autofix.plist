@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  launchd agent: run-analyzer AUTO-FIX pass (gated; daily).
+  launchd agent: run-analyzer AUTO-FIX pass (gated; twice daily).
 
-  Runs `run_analyzer.sh --autofix` once a day (StartCalendarInterval 09:15). This pass is
-  DEFAULT OFF — it no-ops unless RUN_ANALYZER_AUTOFIX=1 (see EnvironmentVariables below).
+  Runs run_analyzer.sh in autofix mode at 07:00 and 19:00 local time.
+  The code defaults OFF unless RUN_ANALYZER_AUTOFIX=1; this deployed plist explicitly arms it.
   When armed it maintains ONE living draft PR: it applies fixes for new high-severity findings
   on an isolated worktree branch, gates each with `./gradlew test`, opens/updates a DRAFT PR
   (never merges), and notifies you with the PR URL. Findings already covered by the open PR
@@ -12,8 +12,7 @@
   The shared /tmp/jd-run-analyzer.lock guarantees it never overlaps the hourly analysis job.
   Needs an authed `gh` and the `claude` CLI on PATH.
 
-  To ARM it, uncomment the EnvironmentVariables block below (or export RUN_ANALYZER_AUTOFIX=1
-  in the launchd user environment). Leave it commented to keep the loop off but scheduled.
+  To disarm while keeping the schedule loaded, set RUN_ANALYZER_AUTOFIX to 0 and reload the agent.
 
   Install (edit ProgramArguments path if your checkout differs):
     cp scripts/com.jd.run-analyzer-autofix.plist ~/Library/LaunchAgents/
@@ -27,8 +26,8 @@
     launchctl bootout gui/$(id -u)/com.jd.run-analyzer-autofix
     rm ~/Library/LaunchAgents/com.jd.run-analyzer-autofix.plist
 
-  First-run dry check: RUN_ANALYZER_AUTOFIX=1 RUN_ANALYZER_AUTOFIX_DRYRUN=1 \
-    tuner/run-analyzer/run_analyzer.sh --autofix   (applies + gates, stops before push/PR/notify)
+  First-run dry check: invoke run_analyzer.sh in autofix mode with
+    RUN_ANALYZER_AUTOFIX=1 and RUN_ANALYZER_AUTOFIX_DRYRUN=1.
 -->
 <plist version="1.0">
 <dict>
@@ -52,12 +51,20 @@
     </dict>
 
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>9</integer>
-        <key>Minute</key>
-        <integer>15</integer>
-    </dict>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>7</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>19</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
 
     <key>ProcessType</key>
     <string>Background</string>

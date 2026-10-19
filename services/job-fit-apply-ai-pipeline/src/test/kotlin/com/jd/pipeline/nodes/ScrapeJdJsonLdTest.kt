@@ -37,7 +37,7 @@ class ScrapeJdJsonLdTest {
         assertTrue(result!!.contains("GEICO"), result)
         assertTrue(result.contains("Staff Cyber Software Engineer"))
         assertTrue(result.contains("Seattle, WA"))
-        assertTrue(result.contains("110000 - 230000"))
+        assertTrue(result.contains("Salary: \$110K - \$230K/yr"), result)
         assertTrue(result.contains("threat modeling"), "description body should be included")
     }
 

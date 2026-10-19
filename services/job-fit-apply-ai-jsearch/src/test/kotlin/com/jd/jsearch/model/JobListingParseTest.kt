@@ -65,4 +65,37 @@ class JobListingParseTest {
         val listings = data.map { mapper.treeToValue(it, JobListing::class.java) }
         assertEquals(listOf("a", "b"), listings.map { it.jobId })
     }
+
+    @Test
+    @DisplayName("derives report fields from JSearch's structured job data")
+    fun derivesStructuredFields() {
+        val l = mapper.readValue(
+            """{"job_id":"z1","job_title":"Senior SDET","employer_name":"ZipStaff","job_is_remote":true,
+                "job_employment_type":"CONTRACTOR","job_min_salary":55,"job_max_salary":65,
+                "job_salary_period":"HOUR","job_required_experience":{"required_experience_in_months":60,
+                "no_experience_required":false},"job_required_skills":["Playwright","","Java"]}""",
+            JobListing::class.java,
+        )
+        assertEquals("Contract", l.employmentType())
+        assertEquals("remote", l.remotePolicy())
+        assertEquals("\$55 - \$65/hr", l.salaryRange())
+        assertEquals(5, l.yoeRequired())
+        assertEquals(listOf("Playwright", "Java"), l.techStack())
+    }
+
+    @Test
+    @DisplayName("formats annual salary in K, reads the newer employment-type spelling, and nulls absent fields")
+    fun formatsAnnualSalaryAndNullsAbsent() {
+        val l = mapper.readValue(
+            """{"job_id":"z2","job_title":"QA","employer_name":"Acme","job_employment_type":"Full-time",
+                "job_min_salary":121400,"job_max_salary":218600,"job_salary_period":"YEAR",
+                "job_required_experience":{"required_experience_in_months":null},"job_required_skills":null}""",
+            JobListing::class.java,
+        )
+        assertEquals("Full-time", l.employmentType())
+        assertEquals("\$121K - \$219K/yr", l.salaryRange())
+        assertNull(l.remotePolicy())
+        assertNull(l.yoeRequired())
+        assertNull(l.techStack())
+    }
 }

@@ -10,6 +10,7 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respondText
+import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.delay
@@ -94,12 +95,19 @@ class FakeLlmServer(private val port: Int, private val fixturesDir: Path) {
      */
     val calls: MutableList<String> = CopyOnWriteArrayList()
 
+    /**
+     * The `model` each call in [calls] asked for, index-aligned with it. Dispatch never looks at
+     * the model, but the quota→local fallback scenario must prove *which* model answered.
+     */
+    val callModels: MutableList<String> = CopyOnWriteArrayList()
+
     /** Per-route FIFO responses installed by one scenario; defaults resume when exhausted. */
     private val responsePlan = ConcurrentHashMap<String, ConcurrentLinkedQueue<PlannedResponse>>()
 
     /** Reset all observable state before a scenario and optionally install queued responses. */
     fun reset(responses: Map<String, List<PlannedResponse>> = emptyMap()) {
         calls.clear()
+        callModels.clear()
         responsePlan.clear()
         responses.forEach { (route, planned) ->
             responsePlan[route] = ConcurrentLinkedQueue(planned)
@@ -139,6 +147,17 @@ class FakeLlmServer(private val port: Int, private val fixturesDir: Path) {
             // LAN/tailnet for the duration of the run; it serves only canned fixtures.
             engine = embeddedServer(Netty, port = port, host = "0.0.0.0") {
                 routing {
+                    // A static job page for JD_URL scenarios: the processor scrapes it over plain
+                    // HTTP (long enough to stay above the thin-content browser fallback, which
+                    // e2e has no browser for). Content is generic; scrape_jd's planned reply
+                    // supplies the scenario's company/role.
+                    get("/e2e-jobs/{id}") {
+                        call.respondText(jobPageHtml(call.parameters["id"].orEmpty()), ContentType.Text.Html)
+                    }
+                    // The same page at a career-site posting path, for employer job-alert links.
+                    get("/job/{slug}/{id}") {
+                        call.respondText(jobPageHtml(call.parameters["id"].orEmpty()), ContentType.Text.Html)
+                    }
                     post("/v1/chat/completions") {
                         val body = mapper.readTree(call.receiveText())
                         val prompt = body.path("messages").path(0).path("content").asText("")
@@ -159,6 +178,7 @@ class FakeLlmServer(private val port: Int, private val fixturesDir: Path) {
                             // Recorded before the reply is shaped, so an injected fault still
                             // appears in the call sequence — a scenario asserting "score_fit ran
                             // and then nothing did" needs the failed call to be visible.
+                            callModels += model
                             calls += route
                             if (planned.delayMs > 0) delay(planned.delayMs)
                             val failing = planned.status !in 200..299
@@ -190,6 +210,14 @@ class FakeLlmServer(private val port: Int, private val fixturesDir: Path) {
 
     fun stop() {
         engine?.stop(500, 2000)
+    }
+
+    private fun jobPageHtml(id: String): String {
+        val para = "URL_INTAKE_PAGE_MARKER posting $id. The quality engineering team owns Kotlin and Playwright " +
+            "automation, Appium mobile suites, contract tests, CI/CD paved roads and release qualification for a " +
+            "distributed platform. You will design test strategy, mentor engineers and improve feedback speed. "
+        return "<!doctype html><html><head><title>Senior Quality Engineer</title></head><body><main><h1>Senior Quality Engineer</h1>" +
+            List(6) { "<p>$para</p>" }.joinToString("") + "</main></body></html>"
     }
 
     private fun dispatch(prompt: String): Pair<String, PlannedResponse>? {

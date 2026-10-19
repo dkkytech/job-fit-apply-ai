@@ -1,0 +1,81 @@
+{
+  "_comment": "One posting, one identity. The watchlist keys what it submits as watchlist:<ats>:<boardKey>:<postingId> (WatchlistRunner.idempotencyKey); the processor keys links in employer job-alert emails (PostingLinks.identify) the same way, so a posting found by both is processed once. The watchlist suite checks each case's employer + external_id produces the key; the pipeline suite checks each url produces it. Cases with no employer are pipeline-only.",
+  "cases": [
+    {
+      "name": "Greenhouse board link with a tracking parameter",
+      "url": "https://boards.greenhouse.io/remitly/jobs/7712345?gh_src=alert",
+      "employer": {"company": "Remitly", "ats": "greenhouse", "board": "remitly"},
+      "external_id": "7712345",
+      "key": "watchlist:greenhouse:remitly:7712345",
+      "canonical_url": "https://job-boards.greenhouse.io/remitly/jobs/7712345"
+    },
+    {
+      "name": "Lever apply link",
+      "url": "https://jobs.lever.co/acme/0f1e2d3c-4b5a-4978-8a9b-0c1d2e3f4a5b/apply",
+      "employer": {"company": "Acme", "ats": "lever", "board": "acme"},
+      "external_id": "0f1e2d3c-4b5a-4978-8a9b-0c1d2e3f4a5b",
+      "key": "watchlist:lever:acme:0f1e2d3c-4b5a-4978-8a9b-0c1d2e3f4a5b",
+      "canonical_url": "https://jobs.lever.co/acme/0f1e2d3c-4b5a-4978-8a9b-0c1d2e3f4a5b"
+    },
+    {
+      "name": "Ashby application link with utm parameters",
+      "url": "https://jobs.ashbyhq.com/acme/9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d/application?utm_source=alert",
+      "employer": {"company": "Acme", "ats": "ashby", "board": "acme"},
+      "external_id": "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d",
+      "key": "watchlist:ashby:acme:9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d",
+      "canonical_url": "https://jobs.ashbyhq.com/acme/9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d"
+    },
+    {
+      "name": "Workday posting (tenant/site scope, requisition id)",
+      "url": "https://remitly.wd5.myworkdayjobs.com/en-US/Remitly_Careers/job/Seattle-WA/Senior-QA-Engineer_R12345?source=jobalert",
+      "employer": {"company": "Remitly", "ats": "workday", "host": "remitly.wd5.myworkdayjobs.com", "tenant": "remitly", "site": "Remitly_Careers"},
+      "external_id": "R12345",
+      "key": "watchlist:workday:remitly/Remitly_Careers:R12345",
+      "canonical_url": "https://remitly.wd5.myworkdayjobs.com/en-US/Remitly_Careers/job/Seattle-WA/Senior-QA-Engineer_R12345"
+    },
+    {
+      "name": "iCIMS posting (the feed's host is the scope)",
+      "url": "https://careers-fhcrc.icims.com/jobs/31234/software-test-engineer/job?hub=7",
+      "employer": {"company": "Fred Hutch Cancer Center", "ats": "icims", "feed": "https://careers-fhcrc.icims.com/jobs/search?ss=1&searchKeyword=software"},
+      "external_id": "31234",
+      "key": "watchlist:icims:careers-fhcrc.icims.com:31234",
+      "canonical_url": "https://careers-fhcrc.icims.com/jobs/31234/job"
+    },
+    {
+      "name": "Microsoft Careers alert: Eightfold click-tracker around the sign-in careerhub link",
+      "url": "https://microsoft.eightfold.ai/vsimp?d=e30.sig&n=https%3A%2F%2Fapply.careers.microsoft.com%2Fcareerhub%2Fexplore%2Fjobs%2F1970393556874530%3Futm_source%3Dposition_notification%26domain%3Dmicrosoft.com",
+      "employer": {"company": "Microsoft", "ats": "eightfold", "host": "apply.careers.microsoft.com", "domain": "microsoft.com"},
+      "external_id": "1970393556874530",
+      "key": "watchlist:eightfold:apply.careers.microsoft.com:1970393556874530",
+      "canonical_url": "https://apply.careers.microsoft.com/careers/job/1970393556874530"
+    },
+    {
+      "name": "Eightfold-hosted career site",
+      "url": "https://starbucks.eightfold.ai/careers/job/481234567890?domain=starbucks.com",
+      "employer": {"company": "Starbucks", "ats": "eightfold", "host": "starbucks.eightfold.ai", "domain": "starbucks.com"},
+      "external_id": "481234567890",
+      "key": "watchlist:eightfold:starbucks.eightfold.ai:481234567890",
+      "canonical_url": "https://starbucks.eightfold.ai/careers/job/481234567890"
+    },
+    {
+      "name": "SuccessFactors career-site posting (no watchlist adapter): keyed on its clean URL, minus the per-email eid",
+      "url": "http://careers.quality-ai.com/job/Santa-Clara-QA-Engineer-CA-95054/603123456/?from=email&eid=27544-2026&utm_source=jobalert&locale=en_GB",
+      "key": "alert:careers.quality-ai.com/job/Santa-Clara-QA-Engineer-CA-95054/603123456/?locale=en_GB",
+      "canonical_url": "http://careers.quality-ai.com/job/Santa-Clara-QA-Engineer-CA-95054/603123456/?locale=en_GB"
+    },
+    {
+      "name": "Jibe career site (REI): keyed on its URL, which is also the watchlist's posting URL",
+      "url": "https://www.rei.jobs/jobs/31561?lang=en-us",
+      "key": "alert:www.rei.jobs/jobs/31561?lang=en-us",
+      "canonical_url": "https://www.rei.jobs/jobs/31561?lang=en-us"
+    },
+    {"name": "Eightfold alert settings link", "url": "https://apply.careers.microsoft.com/careerhub/explore/jobs/notification_settings?utm_source=position_notification", "key": null},
+    {"name": "Unsubscribe link", "url": "https://careers.quality-ai.com/unsubscribe/?token=abc123", "key": null},
+    {"name": "Job search page, not a posting", "url": "https://www.rei.jobs/jobs?location=Seattle&page=2", "key": null},
+    {"name": "Profile editor behind a tracker", "url": "https://microsoft.eightfold.ai/vsimp?d=x&n=https%3A%2F%2Fapply.careers.microsoft.com%2Fcareerhub%2Fme%3Faction%3Dedit", "key": null},
+    {"name": "Opaque click-tracker with no destination", "url": "https://tracking.icims.com/f/a/HPXq_hJ1T91Jls4Li_UE9Q~~/AAIB5hA~/ArxYsxgQa9", "key": null},
+    {"name": "Alert management with an id in the path is still plumbing", "url": "https://careers.example.com/jobs/alerts/98765/edit", "key": null},
+    {"name": "Unsubscribe from one posting's updates", "url": "https://careers.example.com/job/12345/unsubscribe?t=x", "key": null},
+    {"name": "A search page with a numeric segment", "url": "https://careers.example.com/jobs/search/2024?q=qa", "key": null}
+  ]
+}

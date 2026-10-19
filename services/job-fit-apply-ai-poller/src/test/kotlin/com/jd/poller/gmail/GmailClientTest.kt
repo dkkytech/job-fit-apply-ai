@@ -10,6 +10,10 @@ import com.google.api.services.gmail.model.MessagePart
 import com.google.api.services.gmail.model.MessagePartBody
 import com.google.api.services.gmail.model.MessagePartHeader
 import com.google.api.services.gmail.model.Thread
+import com.jd.poller.testutil.GmailInboxStub
+import com.jd.poller.testutil.GmailInboxStub.Companion.blankBody
+import com.jd.poller.testutil.GmailInboxStub.Companion.posting
+import com.jd.poller.testutil.GmailInboxStub.Companion.reply
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -19,6 +23,7 @@ import org.mockito.kotlin.argThat
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
+import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.verifyNoInteractions
 import org.mockito.kotlin.whenever
@@ -311,13 +316,14 @@ class GmailClientTest {
             )
         )
 
-        val result = rig.client().fetchIntakeEmails(maxResults = 5)
+        val result = rig.client().fetchIntakeEmails(batchSize = 5)
         assertEquals(1, result.size)
         assertEquals("m1", result[0].messageId)
         assertEquals("Great role", result[0].subject)
         assertEquals("rec@firm.com", result[0].from)
         assertEquals("We have a role for you.", result[0].body)
-        verify(listReq).setMaxResults(5L)
+        verify(listReq).setMaxResults(GmailClient.LIST_PAGE_SIZE.toLong())
+        verify(listReq).setQ(com.jd.poller.config.PollerConfig.GMAIL_SEARCH_QUERY)
     }
 
     @Test
@@ -399,6 +405,102 @@ class GmailClientTest {
         val result = rig.client().fetchIntakeEmails()
         assertEquals(1, result.size)
         assertEquals("thanks", result[0].body)
+    }
+
+    // ── fetchIntakeEmails: filling the batch past skipped messages ─────────────
+
+    @Test
+    @DisplayName("fetchIntakeEmails reaches an unprocessed posting behind 3+ skipped replies (the old 3-message window hid it)")
+    fun fetchIntakeEmailsFillsBatchPastSkippedReplies() {
+        val stub = GmailInboxStub(
+            inbox = listOf(reply("r1", "t-a"), reply("r2", "t-a"), reply("r3", "t-b"), reply("r4", "t-b"), posting("jd1")),
+            processedThreads = setOf("t-a", "t-b"),
+        )
+
+        val result = GmailClient(stub.gmail).fetchIntakeEmails(batchSize = 3)
+
+        assertEquals(listOf("jd1"), result.map { it.messageId })
+        assertEquals(listOf("r1", "r2", "r3", "r4", "jd1"), stub.fetched)
+    }
+
+    @Test
+    @DisplayName("fetchIntakeEmails follows nextPageToken past a page of skipped replies and blank bodies")
+    fun fetchIntakeEmailsFollowsNextPageToken() {
+        val stub = GmailInboxStub(
+            inbox = listOf(reply("r1", "t-a"), blankBody("b1"), reply("r2", "t-a"), posting("jd1"), posting("jd2")),
+            processedThreads = setOf("t-a"),
+            serverPageSize = 3,
+        )
+
+        val result = GmailClient(stub.gmail).fetchIntakeEmails(batchSize = 3)
+
+        assertEquals(listOf("jd1", "jd2"), result.map { it.messageId })
+        verify(stub.listReq).setPageToken("offset-3")
+        verify(stub.listReq, times(2)).execute()
+    }
+
+    @Test
+    @DisplayName("fetchIntakeEmails stops fetching and listing once the batch is full")
+    fun fetchIntakeEmailsStopsWhenBatchFull() {
+        val stub = GmailInboxStub(
+            inbox = listOf(posting("a"), reply("r1", "t-a"), posting("b"), posting("c"), posting("d")),
+            processedThreads = setOf("t-a"),
+            serverPageSize = 4,
+        )
+
+        val result = GmailClient(stub.gmail).fetchIntakeEmails(batchSize = 2)
+
+        assertEquals(listOf("a", "b"), result.map { it.messageId })
+        assertEquals(listOf("a", "r1", "b"), stub.fetched)
+        verify(stub.listReq, times(1)).execute()
+    }
+
+    @Test
+    @DisplayName("fetchIntakeEmails fetches at most maxScanPerPass messages per pass")
+    fun fetchIntakeEmailsHonorsScanCap() {
+        val stub = GmailInboxStub(
+            inbox = listOf(reply("r1", "t-a"), reply("r2", "t-a"), posting("jd1")),
+            processedThreads = setOf("t-a"),
+            serverPageSize = 2,
+        )
+
+        val result = GmailClient(stub.gmail, maxScanPerPass = 2).fetchIntakeEmails(batchSize = 3)
+
+        assertTrue(result.isEmpty())
+        assertEquals(listOf("r1", "r2"), stub.fetched)
+        verify(stub.listReq, times(1)).execute()
+    }
+
+    @Test
+    @DisplayName("fetchIntakeEmails remembers skipped ids so the next pass neither re-fetches them nor counts them against the scan cap")
+    fun fetchIntakeEmailsCachesSkippedIds() {
+        val stub = GmailInboxStub(
+            inbox = listOf(reply("r1", "t-a"), blankBody("b1"), reply("r2", "t-a"), posting("jd1")),
+            processedThreads = setOf("t-a"),
+        )
+        val client = GmailClient(stub.gmail, maxScanPerPass = 4)
+
+        assertEquals(listOf("jd1"), client.fetchIntakeEmails(batchSize = 3).map { it.messageId })
+        stub.fetched.clear()
+        stub.threadLookups.clear()
+
+        // jd1 was not labeled Processing in this stub, so it is still listed and still returned.
+        assertEquals(listOf("jd1"), client.fetchIntakeEmails(batchSize = 3).map { it.messageId })
+        assertEquals(listOf("jd1"), stub.fetched)
+        assertTrue(stub.threadLookups.isEmpty())
+    }
+
+    @Test
+    @DisplayName("fetchIntakeEmails lists at most MAX_LIST_PAGES pages per pass")
+    fun fetchIntakeEmailsBoundsListPages() {
+        val stub = GmailInboxStub(
+            inbox = List(GmailClient.MAX_LIST_PAGES + 5) { blankBody("b$it") } + posting("jd1"),
+            serverPageSize = 1,
+        )
+
+        assertTrue(GmailClient(stub.gmail).fetchIntakeEmails(batchSize = 3).isEmpty())
+        verify(stub.listReq, times(GmailClient.MAX_LIST_PAGES)).execute()
+        assertEquals(GmailClient.MAX_LIST_PAGES, stub.fetched.size)
     }
 
     // ── createDraftReply ───────────────────────────────────────────────────────
